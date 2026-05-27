@@ -1,0 +1,13 @@
+Aegiuw — Remote Browser Isolation security engine
+Copyright 2026 The Aegiuw Authors
+
+This product includes software developed by the Aegiuw project.
+
+The contents of the `crates/` and `workers/aegis-router/` directories form the
+open-source Core Engine and are licensed under the Apache License, Version 2.0
+(see LICENSE).
+
+The commercial extension layer (Aegis-Enterprise: SaaS billing, Durable Object
+warm-pooling, managed threat-intelligence sync, SIEM streaming, and related
+components) is NOT covered by the Apache 2.0 license and is distributed under
+separate commercial terms.
