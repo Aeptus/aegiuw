@@ -1,0 +1,15 @@
+[package]
+name = "aegis-core"
+description = "Pure, dependency-light risk heuristics for the Aegiuw local agent (Levenshtein typo-squat detection, launch-context classification, SNI parsing, and risk verdicts)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+serde = { workspace = true }
