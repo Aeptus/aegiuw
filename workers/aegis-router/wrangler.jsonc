@@ -1,0 +1,42 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "aegis-open-source-router",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-27",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Surface logs/metrics in the Cloudflare dashboard for debugging the edge router.
+  "observability": {
+    "enabled": true
+  },
+
+  // High-performance binding to Cloudflare's Browser Rendering API. The router uses
+  // this to spin up the ephemeral, blank-profile Chromium sandbox (aegis-cage, §1.3).
+  "browser": {
+    "binding": "AEGIS_CAGE"
+  },
+
+  // Edge KV cache for fast localized allow-list / threat-intel lookups (FR-1, CR-1.2).
+  // NOTE: `id` below is a PLACEHOLDER. Before `wrangler deploy`, create a real
+  // namespace and paste its generated id here:
+  //   npx wrangler kv namespace create LOCAL_SAFE_CACHE
+  "kv_namespaces": [
+    {
+      "binding": "LOCAL_SAFE_CACHE",
+      "id": "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+    }
+  ],
+
+  // Object storage to quarantine and scan downloaded files before host exposure.
+  // Create it first:  npx wrangler r2 bucket create aegis-quarantine-vault
+  "r2_buckets": [
+    {
+      "binding": "DOWNLOAD_SCRUBBER",
+      "bucket_name": "aegis-quarantine-vault"
+    }
+  ]
+
+  // NFR-4.2 (GDPR): when deploying for EU endpoints, enforce Cloudflare Regional
+  // Services / jurisdiction restrictions so containers and worker execution stay in
+  // EU data centers. Configure this per-environment rather than hard-coding here.
+}

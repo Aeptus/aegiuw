@@ -1,0 +1,20 @@
+{
+  "name": "aegis-router",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Aegiuw edge router: stateless Cloudflare Worker that ingests isolate requests from aegis-daemon and orchestrates ephemeral sandbox sessions.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "cf-typegen": "wrangler types"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250527.0",
+    "typescript": "^5.8.3",
+    "wrangler": "^4.95.0"
+  }
+}
