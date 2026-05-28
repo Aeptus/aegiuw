@@ -356,7 +356,15 @@ pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome> {
     }
     c.read_slice(32)?; // random
     c.read_u8_prefixed()?; // legacy_session_id
-    c.read_u16_prefixed()?; // cipher_suites
+
+    // RFC 8446 §4.1.2: `cipher_suites<2..2^16-2>` — at least one suite, and
+    // each suite is exactly 2 bytes. An empty list or an odd byte count is a
+    // spec violation (and a strong signal of a malformed/probe handshake).
+    // SNI backlog C7.
+    let cipher_suites = c.read_u16_prefixed()?;
+    if cipher_suites.is_empty() || cipher_suites.len() % 2 != 0 {
+        return Some(SniOutcome::Malformed);
+    }
 
     // RFC 8446 §4.1.2: a TLS 1.3 ClientHello MUST list a single null
     // compression method. Older TLS allowed deflate too, but the CRIME
@@ -612,15 +620,15 @@ mod tests {
 
     /// Build the handshake-message bytes (HandshakeType + u24 length + body).
     /// Uses spec-compliant defaults: `legacy_version=0x0303`, single null
-    /// compression method.
+    /// compression method, one cipher suite (`TLS_AES_128_GCM_SHA256`).
     fn build_handshake_message(extensions: &[u8]) -> Vec<u8> {
-        build_handshake_message_custom(extensions, TLS_LEGACY_VERSION, &[0x00])
+        build_handshake_message_custom(extensions, TLS_LEGACY_VERSION, &[0x00], &[0x13, 0x01])
     }
 
     /// Build a handshake message with a custom `legacy_version` (used by the
     /// C5 tests that exercise obsolete TLS versions).
     fn build_handshake_message_with_version(extensions: &[u8], legacy_version: u16) -> Vec<u8> {
-        build_handshake_message_custom(extensions, legacy_version, &[0x00])
+        build_handshake_message_custom(extensions, legacy_version, &[0x00], &[0x13, 0x01])
     }
 
     /// Build a handshake message with custom `compression_methods` (used by
@@ -629,19 +637,34 @@ mod tests {
         extensions: &[u8],
         compression_methods: &[u8],
     ) -> Vec<u8> {
-        build_handshake_message_custom(extensions, TLS_LEGACY_VERSION, compression_methods)
+        build_handshake_message_custom(
+            extensions,
+            TLS_LEGACY_VERSION,
+            compression_methods,
+            &[0x13, 0x01],
+        )
+    }
+
+    /// Build a handshake message with custom `cipher_suites` (C7 tests).
+    fn build_handshake_message_with_cipher_suites(
+        extensions: &[u8],
+        cipher_suites: &[u8],
+    ) -> Vec<u8> {
+        build_handshake_message_custom(extensions, TLS_LEGACY_VERSION, &[0x00], cipher_suites)
     }
 
     fn build_handshake_message_custom(
         extensions: &[u8],
         legacy_version: u16,
         compression_methods: &[u8],
+        cipher_suites: &[u8],
     ) -> Vec<u8> {
         let mut body = Vec::new();
         body.extend_from_slice(&legacy_version.to_be_bytes());
         body.extend_from_slice(&[0xAA; 32]); // random
         body.push(0); // legacy_session_id length = 0
-        body.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]); // cipher_suites
+        body.extend_from_slice(&(cipher_suites.len() as u16).to_be_bytes());
+        body.extend_from_slice(cipher_suites);
         body.push(compression_methods.len() as u8);
         body.extend_from_slice(compression_methods);
         body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
@@ -940,6 +963,42 @@ mod tests {
         let records = build_fragmented_records(&handshake, &[split]);
         assert_eq!(
             extract_sni(&records),
+            SniOutcome::Cleartext {
+                host: "example.com".into()
+            }
+        );
+    }
+
+    // ── cipher_suites validation (C7, RFC 8446 §4.1.2) ───────────────────────
+
+    #[test]
+    fn rejects_empty_cipher_suites_list() {
+        // `cipher_suites<2..2^16-2>` — at least one 2-byte suite is required.
+        let handshake = build_handshake_message_with_cipher_suites(&[], &[]);
+        let record = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        assert_eq!(extract_sni(&record), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn rejects_odd_length_cipher_suites_list() {
+        // Each cipher suite is exactly 2 bytes; an odd-byte list means the
+        // sender's length prefix or contents are corrupt.
+        let handshake = build_handshake_message_with_cipher_suites(&[], &[0x13, 0x01, 0x13]);
+        let record = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        assert_eq!(extract_sni(&record), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn accepts_multiple_cipher_suites() {
+        // Positive control: three suites (6 bytes) — TLS_AES_128_GCM_SHA256,
+        // TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256.
+        let handshake = build_handshake_message_with_cipher_suites(
+            &build_sni_extension("example.com"),
+            &[0x13, 0x01, 0x13, 0x02, 0x13, 0x03],
+        );
+        let record = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        assert_eq!(
+            extract_sni(&record),
             SniOutcome::Cleartext {
                 host: "example.com".into()
             }
