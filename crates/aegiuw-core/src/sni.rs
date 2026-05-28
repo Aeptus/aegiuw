@@ -355,7 +355,14 @@ pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome> {
         return Some(SniOutcome::Malformed);
     }
     c.read_slice(32)?; // random
-    c.read_u8_prefixed()?; // legacy_session_id
+
+    // RFC 8446 §4.1.2: `legacy_session_id<0..32>` — at most 32 bytes. A
+    // longer session_id is either a malformed sender or an attacker abusing
+    // the u8 length prefix's 0–255 range. SNI backlog C8.
+    let session_id = c.read_u8_prefixed()?;
+    if session_id.len() > 32 {
+        return Some(SniOutcome::Malformed);
+    }
 
     // RFC 8446 §4.1.2: `cipher_suites<2..2^16-2>` — at least one suite, and
     // each suite is exactly 2 bytes. An empty list or an odd byte count is a
@@ -618,21 +625,33 @@ mod tests {
     // a field. Composed in three layers so multi-record reassembly tests can
     // share the same handshake bytes as the single-record tests.
 
+    /// Default cipher_suites used by every wrapper that doesn't override it.
+    const DEFAULT_CIPHER_SUITES: &[u8] = &[0x13, 0x01]; // TLS_AES_128_GCM_SHA256
+
     /// Build the handshake-message bytes (HandshakeType + u24 length + body).
-    /// Uses spec-compliant defaults: `legacy_version=0x0303`, single null
-    /// compression method, one cipher suite (`TLS_AES_128_GCM_SHA256`).
+    /// Uses spec-compliant defaults across every knob.
     fn build_handshake_message(extensions: &[u8]) -> Vec<u8> {
-        build_handshake_message_custom(extensions, TLS_LEGACY_VERSION, &[0x00], &[0x13, 0x01])
+        build_handshake_message_custom(
+            extensions,
+            TLS_LEGACY_VERSION,
+            &[],
+            DEFAULT_CIPHER_SUITES,
+            &[0x00],
+        )
     }
 
-    /// Build a handshake message with a custom `legacy_version` (used by the
-    /// C5 tests that exercise obsolete TLS versions).
+    /// Build with a custom `legacy_version` (C5 tests).
     fn build_handshake_message_with_version(extensions: &[u8], legacy_version: u16) -> Vec<u8> {
-        build_handshake_message_custom(extensions, legacy_version, &[0x00], &[0x13, 0x01])
+        build_handshake_message_custom(
+            extensions,
+            legacy_version,
+            &[],
+            DEFAULT_CIPHER_SUITES,
+            &[0x00],
+        )
     }
 
-    /// Build a handshake message with custom `compression_methods` (used by
-    /// the C6 tests that exercise non-null and empty lists).
+    /// Build with custom `compression_methods` (C6 tests).
     fn build_handshake_message_with_compression(
         extensions: &[u8],
         compression_methods: &[u8],
@@ -640,29 +659,47 @@ mod tests {
         build_handshake_message_custom(
             extensions,
             TLS_LEGACY_VERSION,
+            &[],
+            DEFAULT_CIPHER_SUITES,
             compression_methods,
-            &[0x13, 0x01],
         )
     }
 
-    /// Build a handshake message with custom `cipher_suites` (C7 tests).
+    /// Build with custom `cipher_suites` (C7 tests).
     fn build_handshake_message_with_cipher_suites(
         extensions: &[u8],
         cipher_suites: &[u8],
     ) -> Vec<u8> {
-        build_handshake_message_custom(extensions, TLS_LEGACY_VERSION, &[0x00], cipher_suites)
+        build_handshake_message_custom(extensions, TLS_LEGACY_VERSION, &[], cipher_suites, &[0x00])
     }
 
+    /// Build with custom `legacy_session_id` (C8 tests). The u8 length prefix
+    /// is computed from the slice — pass 33 bytes to exercise the >32 boundary.
+    fn build_handshake_message_with_session_id(extensions: &[u8], session_id: &[u8]) -> Vec<u8> {
+        build_handshake_message_custom(
+            extensions,
+            TLS_LEGACY_VERSION,
+            session_id,
+            DEFAULT_CIPHER_SUITES,
+            &[0x00],
+        )
+    }
+
+    /// Parameter order tracks the wire layout (version → session_id →
+    /// cipher_suites → compression → extensions) so the function reads in
+    /// the same order as the bytes it produces.
     fn build_handshake_message_custom(
         extensions: &[u8],
         legacy_version: u16,
-        compression_methods: &[u8],
+        session_id: &[u8],
         cipher_suites: &[u8],
+        compression_methods: &[u8],
     ) -> Vec<u8> {
         let mut body = Vec::new();
         body.extend_from_slice(&legacy_version.to_be_bytes());
         body.extend_from_slice(&[0xAA; 32]); // random
-        body.push(0); // legacy_session_id length = 0
+        body.push(session_id.len() as u8);
+        body.extend_from_slice(session_id);
         body.extend_from_slice(&(cipher_suites.len() as u16).to_be_bytes());
         body.extend_from_slice(cipher_suites);
         body.push(compression_methods.len() as u8);
@@ -963,6 +1000,35 @@ mod tests {
         let records = build_fragmented_records(&handshake, &[split]);
         assert_eq!(
             extract_sni(&records),
+            SniOutcome::Cleartext {
+                host: "example.com".into()
+            }
+        );
+    }
+
+    // ── session_id validation (C8, RFC 8446 §4.1.2) ──────────────────────────
+
+    #[test]
+    fn rejects_session_id_longer_than_32_bytes() {
+        // `legacy_session_id<0..32>` — 33 bytes is outside the spec range. The
+        // u8 length prefix happily encodes anything up to 255, so this only
+        // gets caught by an explicit length check.
+        let handshake = build_handshake_message_with_session_id(&[], &[0xBB; 33]);
+        let record = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        assert_eq!(extract_sni(&record), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn accepts_session_id_at_32_byte_boundary() {
+        // 32 bytes is the spec maximum and a common length for legitimate
+        // session resumption — positive control on the inclusive upper bound.
+        let handshake = build_handshake_message_with_session_id(
+            &build_sni_extension("example.com"),
+            &[0xCC; 32],
+        );
+        let record = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        assert_eq!(
+            extract_sni(&record),
             SniOutcome::Cleartext {
                 host: "example.com".into()
             }
