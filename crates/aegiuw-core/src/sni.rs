@@ -639,6 +639,15 @@ fn parse_server_name_extension(data: &[u8]) -> ServerNameOutcome {
         return ServerNameOutcome::Malformed;
     }
 
+    // DNS hostname comparisons are case-insensitive (RFC 4343), but case
+    // normalization is *not* the parser's job — we return the host verbatim
+    // from the wire and let the upstream "normalize + enrich" Layer-1 step
+    // own the canonical form. This keeps `aegiuw-core` a pure observer:
+    // telemetry sees what the sender actually sent, and allow-list lookups
+    // happen one layer up where case-folding and IDN unification belong.
+    // SNI backlog H6 — confirmed *not* normalizing here; tests pin the
+    // case-preservation contract.
+
     // Peek for a duplicate host_name(0) after the one we just extracted.
     if let Some(next_type) = entries.read_u8() {
         if next_type == NAME_TYPE_HOST_NAME {
@@ -1045,6 +1054,38 @@ mod tests {
         ];
         let bytes = build_client_hello(&bad_extensions);
         assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    // ── Case preservation (H6, RFC 4343 — but normalized upstream) ───────────
+
+    #[test]
+    fn preserves_mixed_case_hostname() {
+        // DNS comparisons are case-insensitive (RFC 4343), but the SNI parser
+        // deliberately returns the host verbatim — case normalization is the
+        // upstream "normalize + enrich" step's responsibility. If a future
+        // refactor accidentally lowercases here, this test fails immediately.
+        let bytes = build_client_hello(&build_sni_extension("Example.COM"));
+        assert_eq!(
+            extract_sni(&bytes),
+            SniOutcome::Cleartext {
+                host: "Example.COM".into()
+            }
+        );
+    }
+
+    #[test]
+    fn preserves_uppercase_punycode_prefix() {
+        // RFC 5890 §5: A-labels are case-insensitive *for matching*, but
+        // their canonical form is lowercase `xn--`. We still return the
+        // bytes as observed on the wire — `XN--CAF-DMA` and `xn--caf-dma`
+        // are both spec-legal LDH and the upstream step canonicalizes.
+        let bytes = build_client_hello(&build_sni_extension("XN--CAF-DMA.com"));
+        assert_eq!(
+            extract_sni(&bytes),
+            SniOutcome::Cleartext {
+                host: "XN--CAF-DMA.com".into()
+            }
+        );
     }
 
     // ── LDH/ASCII-only character validation (H5, RFC 5890 §2.3.2.4) ──────────
