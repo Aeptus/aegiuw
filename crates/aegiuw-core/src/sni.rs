@@ -581,6 +581,15 @@ fn parse_server_name_extension(data: &[u8]) -> ServerNameOutcome {
         return ServerNameOutcome::Skip;
     };
 
+    // RFC 6066 §3: HostName is defined as `opaque HostName<1..2^16-1>` —
+    // the type itself requires a non-empty byte string. An empty host_name
+    // is a clear spec violation; refuse the whole ClientHello so callers
+    // route to the warning UX rather than try to match "" against the
+    // allow-cache. SNI backlog H2.
+    if host_str.is_empty() {
+        return ServerNameOutcome::Malformed;
+    }
+
     // RFC 6066 §3: "Literal IPv4 and IPv6 addresses are not permitted in
     // HostName." SNI backlog H1. We use Rust's `IpAddr::from_str` because
     // it handles every legal IPv4/IPv6 textual form (dotted quad, full and
@@ -998,6 +1007,28 @@ mod tests {
         ];
         let bytes = build_client_hello(&bad_extensions);
         assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    // ── Empty-hostname rejection (H2, RFC 6066 §3) ───────────────────────────
+
+    #[test]
+    fn rejects_empty_host_name() {
+        // RFC 6066 §3 defines `HostName<1..2^16-1>` — at least one byte. A
+        // host_name with length-prefix=0 is malformed by the type itself.
+        let bytes = build_client_hello(&build_sni_extension(""));
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn accepts_single_character_hostname() {
+        // Positive control: a 1-byte host is the spec minimum and must not
+        // be confused with the empty case. Future H3 (length bounds) won't
+        // change this — labels up to 63 bytes are legal.
+        let bytes = build_client_hello(&build_sni_extension("a"));
+        assert_eq!(
+            extract_sni(&bytes),
+            SniOutcome::Cleartext { host: "a".into() }
+        );
     }
 
     // ── Numeric-IP SNI rejection (H1, RFC 6066 §3) ───────────────────────────
