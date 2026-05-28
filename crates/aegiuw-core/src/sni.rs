@@ -581,6 +581,16 @@ fn parse_server_name_extension(data: &[u8]) -> ServerNameOutcome {
         return ServerNameOutcome::Skip;
     };
 
+    // RFC 1034 §3.1 / DNS convention: a single trailing dot is the FQDN
+    // marker indicating "absolute name from root." `example.com.` and
+    // `example.com` resolve to the same name — strip the dot so the
+    // upstream allow-cache and telemetry see one canonical shape.
+    // Normalizing *before* H1–H3 means a trailing-dot IP literal
+    // (`192.168.1.1.`) is still caught by H1, and the 253-byte limit
+    // applies to the non-dot form (the spec's intended bound).
+    // SNI backlog H4.
+    let host_str = host_str.strip_suffix('.').unwrap_or(host_str);
+
     // RFC 6066 §3: HostName is defined as `opaque HostName<1..2^16-1>` —
     // the type itself requires a non-empty byte string. An empty host_name
     // is a clear spec violation; refuse the whole ClientHello so callers
@@ -1021,6 +1031,67 @@ mod tests {
         ];
         let bytes = build_client_hello(&bad_extensions);
         assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    // ── Trailing-dot normalization (H4, RFC 1034 §3.1) ───────────────────────
+
+    #[test]
+    fn strips_single_trailing_dot_from_fqdn() {
+        // `example.com.` and `example.com` are the same DNS name; the
+        // trailing dot is the FQDN marker. Returned host MUST be the
+        // canonical (no-dot) form so the allow-cache only needs one shape.
+        let bytes = build_client_hello(&build_sni_extension("example.com."));
+        assert_eq!(
+            extract_sni(&bytes),
+            SniOutcome::Cleartext {
+                host: "example.com".into()
+            }
+        );
+    }
+
+    #[test]
+    fn lone_trailing_dot_is_malformed_via_empty_check() {
+        // After stripping the single dot, the host is empty — H2's empty
+        // check fires. This is the right cascade: H4 normalizes, H2 enforces.
+        let bytes = build_client_hello(&build_sni_extension("."));
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn ipv4_with_trailing_dot_is_malformed_via_ip_check() {
+        // Normalize first, then validate — strips the dot, then H1 catches
+        // the bare IPv4 literal. Without H4 (i.e. with a naive parser that
+        // didn't normalize), `192.168.1.1.` would have slipped past H1.
+        let bytes = build_client_hello(&build_sni_extension("192.168.1.1."));
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn hostname_without_trailing_dot_is_unchanged() {
+        // Positive control: H4 must not touch hostnames that don't end in
+        // a dot. `strip_suffix('.')` returns `None`, the `.unwrap_or` keeps
+        // the original `&str`.
+        let bytes = build_client_hello(&build_sni_extension("example.com"));
+        assert_eq!(
+            extract_sni(&bytes),
+            SniOutcome::Cleartext {
+                host: "example.com".into()
+            }
+        );
+    }
+
+    #[test]
+    fn hostname_at_253_chars_with_trailing_dot_passes_after_strip() {
+        // 253 chars + 1 trailing dot = 254 bytes on the wire, but the
+        // *name* is 253 chars after normalization — exactly the RFC 1035
+        // presentation-form ceiling. Must parse cleanly; the H3 check
+        // applies to the stripped form, not the raw bytes.
+        let mut host = "a.".repeat(126);
+        host.push('a');
+        assert_eq!(host.len(), 253);
+        let with_dot = format!("{host}.");
+        let bytes = build_client_hello(&build_sni_extension(&with_dot));
+        assert_eq!(extract_sni(&bytes), SniOutcome::Cleartext { host });
     }
 
     // ── DNS length bounds (H3, RFC 1035 §2.3.4 / §3.1) ───────────────────────
