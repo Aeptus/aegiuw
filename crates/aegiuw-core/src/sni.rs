@@ -1083,6 +1083,43 @@ mod tests {
         assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
     }
 
+    // ── Property tests: panic-free for arbitrary bytes (S2) ──────────────────
+    //
+    // Complements the cargo-fuzz harnesses under `crates/aegiuw-core/fuzz/`.
+    // Fuzzing runs externally on nightly and finds new edge cases over
+    // hours; proptest runs in every `cargo test` and pins the panic-free
+    // contract per commit. Default 256 cases per property × 3 properties
+    // ≈ 768 calls per test run; parser is linear in input length so this
+    // costs sub-second on a typical machine.
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn extract_sni_never_panics_on_arbitrary_bytes(
+            bytes in prop::collection::vec(any::<u8>(), 0..2048)
+        ) {
+            // Any return value is acceptable — the property is "doesn't panic."
+            let _ = extract_sni(&bytes);
+        }
+
+        #[test]
+        fn reassemble_handshake_never_panics_on_arbitrary_bytes(
+            // Larger range here so proptest can probe the MAX_HANDSHAKE_BYTES
+            // (= 64 KiB) cap with inputs that claim large handshake bodies.
+            bytes in prop::collection::vec(any::<u8>(), 0..70_000)
+        ) {
+            let _ = reassemble_handshake(&bytes);
+        }
+
+        #[test]
+        fn parse_handshake_message_never_panics_on_arbitrary_bytes(
+            bytes in prop::collection::vec(any::<u8>(), 0..2048)
+        ) {
+            let _ = parse_handshake_message(&bytes);
+        }
+    }
+
     // ── IDN / punycode detection (H7, RFC 5890 §2.3.2.1) ─────────────────────
 
     #[test]

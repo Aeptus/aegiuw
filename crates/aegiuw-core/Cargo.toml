@@ -13,3 +13,9 @@ unsafe_code = "forbid"
 
 [dependencies]
 serde = { workspace = true }
+
+[dev-dependencies]
+# Property testing for the SNI parser (SNI backlog S2). Complements the
+# cargo-fuzz harnesses by running on every `cargo test` rather than on
+# nightly-only external invocations.
+proptest = "1"
