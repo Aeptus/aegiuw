@@ -385,6 +385,13 @@ pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome> {
     }
 
     // ── Extensions ─────────────────────────────────────────────────────────
+    //
+    // We read exactly `extensions_len` bytes and never look at the cursor
+    // again. Any bytes after the extensions block (still inside the handshake
+    // body) are ignored — RFC 8446 §4 leaves room for additional fields
+    // ("clients MUST send anything not understood as unknown extensions"),
+    // and conventional TLS servers MUST ignore trailing bytes rather than
+    // reject. SNI backlog C9.
     let extensions = c.read_u16_prefixed()?;
 
     // Scan ALL extensions before deciding: ECH wins over any visible SNI, so
@@ -1002,6 +1009,68 @@ mod tests {
             extract_sni(&records),
             SniOutcome::Cleartext {
                 host: "example.com".into()
+            }
+        );
+    }
+
+    // ── Trailing-bytes tolerance (C9, RFC 8446 §4) ───────────────────────────
+
+    /// Local fixture: build a ClientHello whose handshake body has extra bytes
+    /// after the extensions block. body_len includes those bytes; the parser
+    /// must ignore them rather than reject.
+    fn build_handshake_with_trailing_body_bytes(extensions: &[u8], trailing: &[u8]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&TLS_LEGACY_VERSION.to_be_bytes());
+        body.extend_from_slice(&[0xAA; 32]);
+        body.push(0); // session_id len = 0
+        body.extend_from_slice(&(DEFAULT_CIPHER_SUITES.len() as u16).to_be_bytes());
+        body.extend_from_slice(DEFAULT_CIPHER_SUITES);
+        body.push(1);
+        body.push(0); // null compression
+        body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        body.extend_from_slice(extensions);
+        body.extend_from_slice(trailing); // ← the point of this fixture
+
+        let mut handshake = Vec::new();
+        handshake.push(HANDSHAKE_TYPE_CLIENT_HELLO);
+        let body_len = body.len() as u32;
+        handshake.push(((body_len >> 16) & 0xff) as u8);
+        handshake.push(((body_len >> 8) & 0xff) as u8);
+        handshake.push((body_len & 0xff) as u8);
+        handshake.extend_from_slice(&body);
+        handshake
+    }
+
+    #[test]
+    fn tolerates_trailing_bytes_after_extensions_block() {
+        // 4 bytes of garbage tacked onto the body after the extensions block.
+        // Servers MUST ignore these; we must too — refusing would be over-
+        // strict against legitimate-but-padded ClientHellos.
+        let handshake = build_handshake_with_trailing_body_bytes(
+            &build_sni_extension("example.com"),
+            &[0xDE, 0xAD, 0xBE, 0xEF],
+        );
+        let record = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        assert_eq!(
+            extract_sni(&record),
+            SniOutcome::Cleartext {
+                host: "example.com".into()
+            }
+        );
+    }
+
+    #[test]
+    fn tolerates_zero_padding_after_extensions_block() {
+        // Some implementations pad with zero bytes; pin that this still parses.
+        let handshake = build_handshake_with_trailing_body_bytes(
+            &build_sni_extension("padded.example.com"),
+            &[0x00; 16],
+        );
+        let record = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        assert_eq!(
+            extract_sni(&record),
+            SniOutcome::Cleartext {
+                host: "padded.example.com".into()
             }
         );
     }
