@@ -625,6 +625,20 @@ fn parse_server_name_extension(data: &[u8]) -> ServerNameOutcome {
         return ServerNameOutcome::Malformed;
     }
 
+    // RFC 6066 §3 + RFC 5890 §2.3.2.4: SNI hostnames are ASCII-only LDH
+    // (letter, digit, hyphen) plus dots separating labels. A-labels (IDN
+    // encoding, e.g. `xn--caf-dma`) match the same LDH shape because the
+    // `xn--` prefix and the punycode payload are pure ASCII. Anything else
+    // — raw Unicode, emoji, underscore, control bytes — is illegal here.
+    // The earlier `from_utf8` only confirms valid UTF-8; this is the actual
+    // character-set check. SNI backlog H5.
+    if !host_str
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+    {
+        return ServerNameOutcome::Malformed;
+    }
+
     // Peek for a duplicate host_name(0) after the one we just extracted.
     if let Some(next_type) = entries.read_u8() {
         if next_type == NAME_TYPE_HOST_NAME {
@@ -1031,6 +1045,59 @@ mod tests {
         ];
         let bytes = build_client_hello(&bad_extensions);
         assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    // ── LDH/ASCII-only character validation (H5, RFC 5890 §2.3.2.4) ──────────
+
+    #[test]
+    fn rejects_non_ascii_unicode_in_hostname() {
+        // `café.com` is valid UTF-8 but contains a non-ASCII codepoint.
+        // RFC 6066 SNI requires ASCII; IDN names use punycode A-labels
+        // (`xn--caf-dma`), not raw Unicode.
+        let bytes = build_client_hello(&build_sni_extension("café.com"));
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn rejects_emoji_in_hostname() {
+        // Emoji are valid UTF-8 (4-byte sequences with high-bit-set bytes)
+        // but obviously not LDH.
+        let bytes = build_client_hello(&build_sni_extension("hello💩.com"));
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn rejects_underscore_in_hostname() {
+        // `_` is permitted in some DNS contexts (SRV labels, DKIM selectors)
+        // but not in *host* names per RFC 952/1123. SNI is host-only.
+        let bytes = build_client_hello(&build_sni_extension("foo_bar.example.com"));
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn accepts_punycode_a_label() {
+        // The A-label form of `café.com` — `xn--caf-dma.com`. Pure LDH,
+        // must parse cleanly: IDNs land in SNI in this encoded form.
+        let bytes = build_client_hello(&build_sni_extension("xn--caf-dma.com"));
+        assert_eq!(
+            extract_sni(&bytes),
+            SniOutcome::Cleartext {
+                host: "xn--caf-dma.com".into()
+            }
+        );
+    }
+
+    #[test]
+    fn accepts_hostname_with_hyphens_in_label() {
+        // Hyphens within labels are legal LDH; positive control to pin that
+        // the byte-set check doesn't accidentally reject hyphens.
+        let bytes = build_client_hello(&build_sni_extension("foo-bar.example.com"));
+        assert_eq!(
+            extract_sni(&bytes),
+            SniOutcome::Cleartext {
+                host: "foo-bar.example.com".into()
+            }
+        );
     }
 
     // ── Trailing-dot normalization (H4, RFC 1034 §3.1) ───────────────────────
