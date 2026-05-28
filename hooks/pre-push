@@ -4,8 +4,9 @@
 # aegiuw pre-push hook — thin shim. All policy lives in
 # scripts/quality/registry.mjs; this file only invokes the runner.
 #
-# Git pipes "<local_ref> <local_sha> <remote_ref> <remote_sha>" per ref on
-# stdin. We forward that to the runner so it can diff exactly the pushed
-# range; if stdin is empty, the runner falls back to upstream → main → HEAD^.
+# Git invokes pre-push with two positional args (remote name, remote URL)
+# AND pipes "<local_ref> <local_sha> <remote_ref> <remote_sha>" per ref on
+# stdin. We only consume stdin; positional args are intentionally dropped so
+# the runner's strict --flag-only parser stays simple.
 set -e
-exec node scripts/quality/runner.mjs --mode=prepush "$@"
+exec node scripts/quality/runner.mjs --mode=prepush

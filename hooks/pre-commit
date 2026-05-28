@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # aegiuw pre-commit hook — thin shim. All policy lives in
-# scripts/quality/registry.mjs; this file only invokes the runner.
+# scripts/quality/registry.mjs; this file only invokes the runner. Git passes
+# no positional args to pre-commit; intentionally not forwarding "$@" so this
+# stays consistent with the pre-push hook.
 set -e
-exec node scripts/quality/runner.mjs --mode=staged "$@"
+exec node scripts/quality/runner.mjs --mode=staged
