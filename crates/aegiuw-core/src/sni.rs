@@ -31,6 +31,16 @@
 //!                                          handshake; the visible SNI is decoy
 //! ```
 //!
+//! ## SSL 2.0 ClientHello (legacy, never accepted)
+//!
+//! SSL 2.0 had a fundamentally different ClientHello layout — a record header
+//! whose first byte has the high bit set (`0x80`/`0x82`) and a `msg_type=0x01`
+//! at byte `[2]`. The first byte therefore doesn't match
+//! [`CONTENT_TYPE_HANDSHAKE`] (`22 = 0x16`), so the parser immediately rejects
+//! these as [`SniOutcome::Malformed`]. SSL 2.0 had no SNI extension anyway
+//! and is forbidden by RFC 6176; we keep no special variant for it. Vintage
+//! probing tools still send this shape — the test suite pins the rejection.
+//!
 //! # Multi-record reassembly
 //!
 //! A single ClientHello *handshake message* is allowed to span multiple TLS
@@ -968,6 +978,40 @@ mod tests {
         ];
         let bytes = build_client_hello(&bad_extensions);
         assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    // ── SSL 2.0 ClientHello rejection (C13, RFC 6176) ────────────────────────
+
+    #[test]
+    fn rejects_ssl_2_0_short_format_client_hello() {
+        // Classic SSL 2.0 short-form ClientHello header:
+        //   byte[0]: 0x80 + msg_length_hi (high bit set indicates 2-byte length, no padding)
+        //   byte[1]: msg_length_lo
+        //   byte[2]: msg_type = 0x01 (CLIENT-HELLO)
+        //   byte[3..5]: version = 0x0002 (SSL 2.0)
+        // Our content-type check at byte[0] != 0x16 immediately rejects.
+        // RFC 6176 prohibits SSL 2.0 anyway.
+        let ssl2 = [
+            0x80, 0x2E, // 2-byte length, high bit set
+            0x01, // CLIENT-HELLO
+            0x00, 0x02, // version = SSL 2.0
+            0x00, 0x18, // cipher-spec-length
+            0x00, 0x00, // session-id-length
+            0x00, 0x10, // challenge-length
+        ];
+        assert_eq!(extract_sni(&ssl2), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn rejects_ssl_2_0_long_format_client_hello() {
+        // SSL 2.0 long-form (3-byte length) variant: byte[0] high bit clear,
+        // but the first byte is still 0x00..=0x3F (record-length high), not 0x16.
+        let ssl2 = [
+            0x00, 0x00, 0x2E, // 3-byte length
+            0x01, // CLIENT-HELLO
+            0x00, 0x02, // version = SSL 2.0
+        ];
+        assert_eq!(extract_sni(&ssl2), SniOutcome::Malformed);
     }
 
     // ── HRR SNI consistency (C12, RFC 8446 §4.1.4) ───────────────────────────
