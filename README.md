@@ -83,6 +83,19 @@ npm run dev            # local Worker via wrangler
 npm run deploy         # wrangler deploy  (FR-1.1: single-command edge deploy)
 ```
 
+### Quality gates (git hooks)
+
+```bash
+npm run hooks:install    # one-time: points core.hooksPath at hooks/
+npm run quality:staged   # what pre-commit runs
+npm run quality:prepush  # what pre-push runs (scoped to push range)
+npm run quality:local    # everything, repo-wide
+npm run test:quality     # unit tests for the runner/registry
+```
+
+There is no GitHub Actions CI by deliberate choice (org policy + small repo).
+The same gates run locally and in hooks. Full architecture: [`docs/quality-gates.md`](docs/quality-gates.md).
+
 ## Known caveats (truth-in-labeling)
 
 These are real-world constraints the PRD's prose glosses over; they shape the
