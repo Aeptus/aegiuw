@@ -357,7 +357,17 @@ pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome> {
     c.read_slice(32)?; // random
     c.read_u8_prefixed()?; // legacy_session_id
     c.read_u16_prefixed()?; // cipher_suites
-    c.read_u8_prefixed()?; // compression_methods
+
+    // RFC 8446 §4.1.2: a TLS 1.3 ClientHello MUST list a single null
+    // compression method. Older TLS allowed deflate too, but the CRIME
+    // attack (CVE-2012-4929) means a sender claiming non-null compression
+    // alongside null is either obsolete or hostile. The lenient bar from
+    // the backlog (C6) is "MUST contain null(0)"; an empty list or a list
+    // of only non-null methods is rejected.
+    let compression = c.read_u8_prefixed()?;
+    if !compression.contains(&0) {
+        return Some(SniOutcome::Malformed);
+    }
 
     // ── Extensions ─────────────────────────────────────────────────────────
     let extensions = c.read_u16_prefixed()?;
@@ -611,6 +621,15 @@ mod tests {
     /// C5 tests that exercise obsolete TLS versions).
     fn build_handshake_message_with_version(extensions: &[u8], legacy_version: u16) -> Vec<u8> {
         build_handshake_message_custom(extensions, legacy_version, &[0x00])
+    }
+
+    /// Build a handshake message with custom `compression_methods` (used by
+    /// the C6 tests that exercise non-null and empty lists).
+    fn build_handshake_message_with_compression(
+        extensions: &[u8],
+        compression_methods: &[u8],
+    ) -> Vec<u8> {
+        build_handshake_message_custom(extensions, TLS_LEGACY_VERSION, compression_methods)
     }
 
     fn build_handshake_message_custom(
@@ -970,6 +989,46 @@ mod tests {
         let handshake = build_handshake_message_with_version(
             &build_sni_extension("example.com"),
             TLS_LEGACY_VERSION,
+        );
+        let record = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        assert_eq!(
+            extract_sni(&record),
+            SniOutcome::Cleartext {
+                host: "example.com".into()
+            }
+        );
+    }
+
+    // ── compression_methods validation (C6, RFC 8446 §4.1.2) ─────────────────
+
+    #[test]
+    fn rejects_compression_methods_without_null() {
+        // Only deflate (0x01), no null — TLS 1.3 says MUST be exactly [0x00],
+        // and even legacy senders include null. A list without null is
+        // either CRIME-attack-vintage or hostile.
+        let handshake = build_handshake_message_with_compression(&[], &[0x01]);
+        let record = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        assert_eq!(extract_sni(&record), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn rejects_empty_compression_methods() {
+        // RFC 8446 §4.1.2 requires exactly one byte (null). Empty list is
+        // both spec-violating and a degenerate sentinel — refuse.
+        let handshake = build_handshake_message_with_compression(&[], &[]);
+        let record = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        assert_eq!(extract_sni(&record), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn accepts_legacy_compression_with_null_present() {
+        // A legacy TLS 1.2 client offering [deflate, null] meets the "MUST
+        // contain null" bar. TLS 1.3 senders never send this, but accepting
+        // it keeps the parser tolerant of older traffic that still includes
+        // a fallback path to the (mandatory) null method.
+        let handshake = build_handshake_message_with_compression(
+            &build_sni_extension("example.com"),
+            &[0x01, 0x00],
         );
         let record = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
         assert_eq!(
