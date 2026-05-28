@@ -131,6 +131,8 @@
 //!   of the Layer 1 "normalize + enrich" step, not this parser. We
 //!   report `Cleartext { host }` verbatim from the wire.
 
+use std::net::IpAddr;
+
 use serde::{Deserialize, Serialize};
 
 /// Extension type for `server_name` (RFC 6066 §3).
@@ -579,6 +581,17 @@ fn parse_server_name_extension(data: &[u8]) -> ServerNameOutcome {
         return ServerNameOutcome::Skip;
     };
 
+    // RFC 6066 §3: "Literal IPv4 and IPv6 addresses are not permitted in
+    // HostName." SNI backlog H1. We use Rust's `IpAddr::from_str` because
+    // it handles every legal IPv4/IPv6 textual form (dotted quad, full and
+    // compressed IPv6, IPv4-mapped IPv6, etc.) — far more accurate than a
+    // regex would be. Bracket-wrapped forms (`[::1]`) fail to parse and
+    // fall through; they're degenerate non-hostnames the upstream allowlist
+    // will reject anyway.
+    if host_str.parse::<IpAddr>().is_ok() {
+        return ServerNameOutcome::Malformed;
+    }
+
     // Peek for a duplicate host_name(0) after the one we just extracted.
     if let Some(next_type) = entries.read_u8() {
         if next_type == NAME_TYPE_HOST_NAME {
@@ -985,6 +998,74 @@ mod tests {
         ];
         let bytes = build_client_hello(&bad_extensions);
         assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    // ── Numeric-IP SNI rejection (H1, RFC 6066 §3) ───────────────────────────
+
+    #[test]
+    fn rejects_ipv4_literal_as_sni() {
+        // RFC 6066 §3: "Literal IPv4 and IPv6 addresses are not permitted in
+        // HostName." A bare dotted quad is the most common violation we'd
+        // expect from non-browser clients.
+        let bytes = build_client_hello(&build_sni_extension("192.168.1.1"));
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn rejects_ipv4_public_literal_as_sni() {
+        // Same rule for public IPs — the protocol doesn't care which range.
+        let bytes = build_client_hello(&build_sni_extension("8.8.8.8"));
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn rejects_ipv6_loopback_as_sni() {
+        // Compressed IPv6 form "::1" — loopback.
+        let bytes = build_client_hello(&build_sni_extension("::1"));
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn rejects_ipv6_documentation_range_as_sni() {
+        // The RFC 3849 documentation range, conventional in tests.
+        let bytes = build_client_hello(&build_sni_extension("2001:db8::1"));
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn rejects_ipv4_mapped_ipv6_as_sni() {
+        // IPv4-mapped IPv6 (::ffff:a.b.c.d) is still an IP literal.
+        let bytes = build_client_hello(&build_sni_extension("::ffff:192.168.1.1"));
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn accepts_hostname_that_starts_with_digits() {
+        // Sanity: "1.example.com" looks vaguely numeric but is a perfectly
+        // legal DNS hostname — must not be rejected by the IP check.
+        let bytes = build_client_hello(&build_sni_extension("1.example.com"));
+        assert_eq!(
+            extract_sni(&bytes),
+            SniOutcome::Cleartext {
+                host: "1.example.com".into()
+            }
+        );
+    }
+
+    #[test]
+    fn accepts_hostname_with_three_dots_but_not_four_octets() {
+        // "1.2.3" (three dots, three components) parses as neither a valid
+        // IPv4 nor a typical DNS name — it's a fragment. `IpAddr::from_str`
+        // rejects it, so we fall through to the hostname path and accept it
+        // as-is (the upstream allowlist will be the gate on whether it's
+        // actually a recognized domain).
+        let bytes = build_client_hello(&build_sni_extension("1.2.3.4.example.com"));
+        assert_eq!(
+            extract_sni(&bytes),
+            SniOutcome::Cleartext {
+                host: "1.2.3.4.example.com".into()
+            }
+        );
     }
 
     // ── DTLS bytes rejection (C14, RFC 9147, out-of-scope by design) ─────────
