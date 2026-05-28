@@ -54,9 +54,8 @@ Three layers, deliberately decoupled:
 │   └── aegiuw-daemon/   # privileged background agent (TUN, fork logic) — depends on aegiuw-core
 ├── workers/
 │   └── aegiuw-router/   # Cloudflare Worker: stateless traffic controller + sandbox orchestration
-├── docs/
-│   └── PRD.md          # product requirements (source of the FR-/CR-/NFR- IDs referenced in code)
-└── .github/workflows/  # CI for both the Rust and Worker stacks
+└── docs/
+    └── PRD.md          # product requirements (source of the FR-/CR-/NFR- IDs referenced in code)
 ```
 
 ## Quickstart

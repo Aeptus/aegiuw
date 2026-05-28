@@ -225,10 +225,12 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 **N80. Auto-update.** **Recommendation:** Sparkle / WinSparkle for desktop; Linux via the platform package manager. Signing key in HSM. Canary → stable rollout with usage telemetry gates.
 
 **N81. Test strategy.** **Recommendation: four layers —**
-1. Unit (`cargo test`, fast, hot in CI).
+1. Unit (`cargo test`, fast, hot locally).
 2. Integration with fixture ClientHello/QUIC packet blobs.
-3. End-to-end via Playwright against a real sandbox in CI.
+3. End-to-end via Playwright against a real sandbox (run locally on demand).
 4. Continuous fuzz (`cargo-fuzz`) on the SNI/QUIC parsers — adversary-controlled bytes.
+
+*Note:* there is intentionally **no GitHub Actions CI** for this repo. All quality gates (`cargo test`, `cargo clippy -D warnings`, `tsc --noEmit`, `cargo-fuzz`) run locally and pre-push by contributor convention. Decision recorded after the initial scaffold; if/when scale demands automation, revisit.
 
 ## O. Distribution & installation
 

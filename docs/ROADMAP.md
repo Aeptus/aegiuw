@@ -8,9 +8,9 @@ Bottom-to-top phased build plan. Each layer is a coherent unit of work with the 
 
 ## Layer 0 — Foundations ✅ complete
 
-Monorepo, Cargo workspace, Worker scaffold, CI (Rust + Worker), **AGPL-3.0-or-later** license, README, PRD, decision register, and the full `aegis-*` → `aegiuw-*` rename.
+Monorepo, Cargo workspace, Worker scaffold, **AGPL-3.0-or-later** license, README, PRD, decision register, and the full `aegis-*` → `aegiuw-*` rename. Quality gates are enforced locally (no GitHub Actions CI by choice — see DECISIONS.N81).
 
-**Done:** `cargo test`, `cargo clippy -D warnings`, and `tsc --noEmit` all green.
+**Done:** `cargo test`, `cargo clippy -D warnings`, and `tsc --noEmit` all green locally.
 
 ---
 
