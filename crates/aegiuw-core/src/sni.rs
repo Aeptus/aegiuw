@@ -440,8 +440,9 @@ mod tests {
         // through parse_client_hello → Malformed.
         let bad_extensions = vec![
             0x00, 0x64, // ext_type
-            0x00, 0x64, // ext_data_length = 100 (lie)
-                       // …no payload follows…
+            0x00,
+            0x64, // ext_data_length = 100 (lie)
+                  // …no payload follows…
         ];
         let bytes = build_client_hello(&bad_extensions);
         assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
