@@ -11,6 +11,15 @@ dist/
 .dev.vars.*
 wrangler.toml.bak
 
+# Quality runner artifacts (content-hash cache + per-run logs).
+# Cache is reproducible; logs are pruned after 7 days but never committed.
+.aeptus-cache/
+logs/
+
+# Local tool caches (Chau7 helper, Claude project state)
+.chau7/
+.claude/
+
 # Secrets / local config (never commit signing keys or device tokens)
 *.pem
 *.key

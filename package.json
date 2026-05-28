@@ -1,0 +1,22 @@
+{
+  "name": "aegiuw",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Workspace root for aegiuw — exposes the quality runner used by git hooks and local invocation.",
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "scripts": {
+    "hooks:install": "node scripts/quality/install-hooks.mjs",
+    "quality:staged": "node scripts/quality/runner.mjs --mode=staged",
+    "quality:prepush": "node scripts/quality/runner.mjs --mode=prepush",
+    "quality:prepush:full": "node scripts/quality/runner.mjs --mode=prepush-full",
+    "quality:local": "node scripts/quality/runner.mjs --mode=local",
+    "quality:cloud-parity": "node scripts/quality/runner.mjs --mode=cloud-parity",
+    "quality:cache:status": "node scripts/quality/runner.mjs --cache-status",
+    "quality:cache:clear": "node scripts/quality/runner.mjs --cache-clear",
+    "test:quality": "node --test 'scripts/quality/__tests__/*.test.mjs'"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
