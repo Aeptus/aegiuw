@@ -1083,6 +1083,55 @@ mod tests {
         assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
     }
 
+    // ── Linear scaling under extension explosion (S3) ────────────────────────
+
+    #[test]
+    fn parses_client_hello_with_many_small_extensions_in_linear_time() {
+        // Build a ClientHello with N small extensions (each a unique type
+        // outside the well-known range, empty payload). The handshake bytes
+        // exceed a single 16 KiB TLS record (RFC 8446 §5.1 MAX_RECORD_FRAGMENT)
+        // so this also exercises the C1 multi-record reassembly path.
+        // Assert the parser stays linear — quadratic blowup in the
+        // duplicate-tracking set would take seconds, while linear behavior
+        // takes milliseconds.
+        use std::time::Instant;
+
+        const N: usize = 10_000;
+        let mut extensions = Vec::with_capacity(N * 4);
+        for i in 0..N {
+            // 0x0100..0x2810 — no overlap with any well-known extension type
+            // (server_name=0x0000, ECH=0xfe0d, pre_shared_key=0x0029, …).
+            let ext_type = (0x0100u16).wrapping_add(i as u16);
+            extensions.extend_from_slice(&build_extension(ext_type, &[]));
+        }
+
+        // Fragment across ~12 KB records (well under MAX_RECORD_FRAGMENT)
+        // so reassembly walks several records.
+        let handshake = build_handshake_message(&extensions);
+        let chunk = 12_000usize;
+        let mut splits = Vec::new();
+        let mut at = chunk;
+        while at < handshake.len() {
+            splits.push(at);
+            at += chunk;
+        }
+        let bytes = build_fragmented_records(&handshake, &splits);
+
+        let start = Instant::now();
+        let outcome = extract_sni(&bytes);
+        let elapsed = start.elapsed();
+
+        assert_eq!(outcome, SniOutcome::NotFound, "got {outcome:?} for N={N}");
+
+        // 500 ms is generous — covers debug builds with sanitizers + a slow
+        // CI machine. A quadratic loop on N=10_000 would take ~tens of
+        // seconds on the same hardware.
+        assert!(
+            elapsed.as_millis() < 500,
+            "parser took {elapsed:?} for {N} extensions — quadratic blowup?",
+        );
+    }
+
     // ── Property tests: panic-free for arbitrary bytes (S2) ──────────────────
     //
     // Complements the cargo-fuzz harnesses under `crates/aegiuw-core/fuzz/`.
