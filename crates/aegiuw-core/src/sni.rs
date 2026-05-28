@@ -351,20 +351,44 @@ pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome> {
     let mut sni_host: Option<String> = None;
     let mut ext = Cursor::new(extensions);
 
+    // RFC 8446 §4.2: "There MUST NOT be more than one extension of the same
+    // type in a given extension block." Track every type we've already seen so
+    // we can refuse repeats — this single check addresses both the duplicate
+    // `server_name` case (SNI backlog C3, RFC 6066) and the duplicate
+    // `encrypted_client_hello` case (C4) in one place. A small `Vec` is faster
+    // than a `HashSet` for the realistic ~15–20 extension count per CH.
+    let mut seen_ext_types: Vec<u16> = Vec::new();
+
     while ext.remaining() >= 4 {
         let ext_type = ext.read_u16()?;
         let ext_data = ext.read_u16_prefixed()?;
+
+        if seen_ext_types.contains(&ext_type) {
+            return Some(SniOutcome::Malformed);
+        }
+        seen_ext_types.push(ext_type);
 
         match ext_type {
             EXT_ENCRYPTED_CLIENT_HELLO => {
                 ech_present = true;
             }
-            EXT_SERVER_NAME if sni_host.is_none() => {
-                // Failures inside a single extension don't fail the whole
-                // parse — they just mean we didn't get a usable host from
-                // this one. Other extensions (e.g. ECH) are still scanned.
-                if let Some(host) = parse_server_name_extension(ext_data) {
-                    sni_host = Some(host);
+            EXT_SERVER_NAME => {
+                match parse_server_name_extension(ext_data) {
+                    ServerNameOutcome::Host(host) => {
+                        sni_host = Some(host);
+                    }
+                    ServerNameOutcome::Skip => {
+                        // Well-formed extension but no usable host_name (e.g.
+                        // first entry was a non-host_name name_type, or its
+                        // payload wasn't valid UTF-8 ASCII). Other extensions
+                        // (e.g. ECH) may still apply.
+                    }
+                    ServerNameOutcome::Malformed => {
+                        // RFC violation inside the extension itself (e.g. two
+                        // `host_name` entries in the same ServerNameList,
+                        // truncated length prefix). Reject the whole CH.
+                        return Some(SniOutcome::Malformed);
+                    }
                 }
             }
             _ => {}
@@ -380,30 +404,75 @@ pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome> {
     })
 }
 
-/// Parse the body of a `server_name` extension (RFC 6066 §3) and return the
-/// first `host_name` entry as a String. Returns `None` if the extension is
-/// malformed, empty, or only contains non-`host_name` entries — the caller
-/// treats `None` as "no SNI in this extension" and keeps scanning.
-fn parse_server_name_extension(data: &[u8]) -> Option<String> {
+/// Result of parsing one `server_name` extension's body.
+///
+/// Distinguishing the three states matters: `Skip` lets the caller keep
+/// scanning other extensions (so a non-`host_name` entry doesn't break ECH
+/// detection), while `Malformed` propagates as `SniOutcome::Malformed` — the
+/// failure-closed signal for clear RFC violations.
+enum ServerNameOutcome {
+    /// Successfully extracted a `host_name` entry.
+    Host(String),
+    /// Well-formed extension but no usable host: empty list, first entry was
+    /// a non-`host_name` name_type, or the host bytes weren't valid UTF-8
+    /// ASCII (RFC 6066 forbids non-ASCII anyway).
+    Skip,
+    /// Spec violation that should reject the whole ClientHello — e.g. two
+    /// `host_name` entries in the same ServerNameList (RFC 6066 §3
+    /// "MUST NOT contain more than one name of the same name_type") or a
+    /// length prefix that overruns its payload.
+    Malformed,
+}
+
+/// Parse the body of a `server_name` extension (RFC 6066 §3) into a
+/// [`ServerNameOutcome`].
+///
+/// We consume the *first* ServerName entry. Then, before returning, we peek
+/// at the next byte to detect a duplicate `host_name(0)` entry — the
+/// RFC 6066 §3 "MUST NOT contain more than one name of the same name_type"
+/// violation. Subsequent entries with non-host_name types are ignored
+/// (their structure is undefined — we can't safely walk past them but we
+/// don't reject either).
+fn parse_server_name_extension(data: &[u8]) -> ServerNameOutcome {
     let mut c = Cursor::new(data);
-    let list = c.read_u16_prefixed()?;
+    let Some(list) = c.read_u16_prefixed() else {
+        return ServerNameOutcome::Malformed;
+    };
     let mut entries = Cursor::new(list);
 
-    // We only consume the *first* ServerName. RFC 6066 §3 leaves room for a
-    // list but in practice clients send exactly one host_name entry, and the
-    // structure of any non-host_name entry is undefined — so we can't safely
-    // skip past one to look for a later host_name.
     if entries.remaining() < 3 {
-        return None;
+        // Empty list or too-short first entry: spec-violating but distinct
+        // from a duplicate. T10 will tighten "empty list" to Malformed; for
+        // now treat as Skip to preserve existing test behavior.
+        return ServerNameOutcome::Skip;
     }
-    let name_type = entries.read_u8()?;
+
+    let Some(name_type) = entries.read_u8() else {
+        return ServerNameOutcome::Malformed;
+    };
     if name_type != NAME_TYPE_HOST_NAME {
-        return None;
+        return ServerNameOutcome::Skip;
     }
-    let host = entries.read_u16_prefixed()?;
-    // RFC 6066: HostName is ASCII (IDNs are ACE/punycode-encoded). ASCII is
-    // valid UTF-8, so anything that fails this is malformed in practice.
-    core::str::from_utf8(host).ok().map(str::to_string)
+    let Some(host) = entries.read_u16_prefixed() else {
+        return ServerNameOutcome::Malformed;
+    };
+    let Ok(host_str) = core::str::from_utf8(host) else {
+        // RFC 6066: HostName is ASCII. Non-UTF-8 is illegal but we treat it
+        // as "no usable host" rather than reject, to match existing behavior
+        // and avoid being more strict than necessary on garbage payloads.
+        return ServerNameOutcome::Skip;
+    };
+
+    // Peek for a duplicate host_name(0) after the one we just extracted.
+    if let Some(next_type) = entries.read_u8() {
+        if next_type == NAME_TYPE_HOST_NAME {
+            return ServerNameOutcome::Malformed;
+        }
+        // Any other subsequent entry has undefined structure; we accept the
+        // host we already extracted and stop scanning the list.
+    }
+
+    ServerNameOutcome::Host(host_str.to_string())
 }
 
 /// Bounds-checked cursor over an adversary-controlled byte slice.
@@ -597,6 +666,36 @@ mod tests {
         ext
     }
 
+    /// Build a `server_name` extension whose ServerNameList contains every
+    /// host_name in `hosts`. Used to construct the
+    /// "two-host_names-in-one-list" RFC 6066 §3 violation fixture.
+    fn build_sni_extension_with_hosts(hosts: &[&str]) -> Vec<u8> {
+        let mut entries = Vec::new();
+        for h in hosts {
+            let b = h.as_bytes();
+            entries.push(NAME_TYPE_HOST_NAME);
+            entries.extend_from_slice(&(b.len() as u16).to_be_bytes());
+            entries.extend_from_slice(b);
+        }
+        let mut list = Vec::new();
+        list.extend_from_slice(&(entries.len() as u16).to_be_bytes());
+        list.extend_from_slice(&entries);
+        let mut ext = Vec::new();
+        ext.extend_from_slice(&EXT_SERVER_NAME.to_be_bytes());
+        ext.extend_from_slice(&(list.len() as u16).to_be_bytes());
+        ext.extend_from_slice(&list);
+        ext
+    }
+
+    /// Build an arbitrary extension by type and payload.
+    fn build_extension(ext_type: u16, payload: &[u8]) -> Vec<u8> {
+        let mut ext = Vec::new();
+        ext.extend_from_slice(&ext_type.to_be_bytes());
+        ext.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        ext.extend_from_slice(payload);
+        ext
+    }
+
     // ── extract_sni: outcome tests ───────────────────────────────────────────
 
     #[test]
@@ -661,14 +760,26 @@ mod tests {
     }
 
     #[test]
-    fn non_utf8_host_is_malformed() {
-        // RFC 6066: HostName is ASCII. A non-UTF-8 byte sequence cannot be a
-        // legitimate host_name, so the parse-pass on the SNI extension fails
-        // and (with no ECH present) we report NotFound, not Cleartext.
+    fn non_utf8_host_yields_not_found_not_malformed() {
+        // RFC 6066: HostName is ASCII. A non-UTF-8 byte sequence is technically
+        // a spec violation, but we *don't* upgrade it to Malformed — pragmatic
+        // leniency: garbage payload is treated as "no usable host" so other
+        // extensions (e.g. ECH) can still be observed.
+        //
+        // Fixture geometry — be precise so the length prefixes don't have a
+        // hidden second malformation:
+        //   ext_data_length = 8 (list_len_prefix=2 + list=6)
+        //   list_len = 6 (entry = name_type=1 + host_len_prefix=2 + host=3)
+        //   entry: name_type=0, host_len=3, host bytes = 0xff 0xfe 0xfd
         let mut ext = Vec::new();
         ext.extend_from_slice(&EXT_SERVER_NAME.to_be_bytes());
-        // list_len=6, entry: name_type=0, host_len=3, three non-UTF-8 bytes
-        ext.extend_from_slice(&[0x00, 0x06, 0x00, 0x06, 0x00, 0x03, 0xff, 0xfe, 0xfd]);
+        ext.extend_from_slice(&[
+            0x00, 0x08, // ext_data_length = 8
+            0x00, 0x06, // list_len = 6
+            0x00, // name_type = host_name(0)
+            0x00, 0x03, // host_len = 3
+            0xff, 0xfe, 0xfd, // non-UTF-8 host bytes
+        ]);
         let bytes = build_client_hello(&ext);
         assert_eq!(extract_sni(&bytes), SniOutcome::NotFound);
     }
@@ -776,6 +887,71 @@ mod tests {
         let records = build_fragmented_records(&handshake, &[split]);
         assert_eq!(
             extract_sni(&records),
+            SniOutcome::Cleartext {
+                host: "example.com".into()
+            }
+        );
+    }
+
+    // ── Duplicate-extension rejection (C3 + C4, RFC 8446 §4.2, RFC 6066 §3) ──
+
+    #[test]
+    fn rejects_two_server_name_extensions_in_one_client_hello() {
+        // RFC 8446 §4.2: no duplicate extension types. Pre-C3 this silently
+        // ignored the second.
+        let mut extensions = build_sni_extension("first.example.com");
+        extensions.extend_from_slice(&build_sni_extension("second.example.com"));
+        let bytes = build_client_hello(&extensions);
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn rejects_two_host_name_entries_inside_one_server_name() {
+        // RFC 6066 §3: ServerNameList MUST NOT contain more than one name of
+        // the same name_type. Pre-C3 we kept only the first host_name and
+        // silently dropped the second.
+        let extensions =
+            build_sni_extension_with_hosts(&["first.example.com", "second.example.com"]);
+        let bytes = build_client_hello(&extensions);
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn rejects_two_encrypted_client_hello_extensions() {
+        // Same RFC 8446 §4.2 rule, applied to ECH. Closes C4 alongside C3
+        // via the shared "no duplicate ext types" check.
+        let mut extensions = build_ech_extension();
+        extensions.extend_from_slice(&build_ech_extension());
+        let bytes = build_client_hello(&extensions);
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn rejects_two_duplicate_unknown_extensions() {
+        // RFC 8446 §4.2 applies to every extension type, not just the ones we
+        // care about. A duplicate of an unknown type is still a malformed
+        // ClientHello.
+        let mut extensions = build_extension(0x0050, &[0xAA, 0xBB]);
+        extensions.extend_from_slice(&build_extension(0x0050, &[0xCC, 0xDD]));
+        // Add a real SNI extension too so the test is unambiguous: if dup
+        // detection weren't firing, we'd see Cleartext instead of Malformed.
+        extensions.extend_from_slice(&build_sni_extension("legit.example.com"));
+        let bytes = build_client_hello(&extensions);
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn accepts_two_distinct_unknown_extensions() {
+        // Sanity check: GREASE-style noise (two *different* unknown types)
+        // must still parse cleanly to ensure C3 didn't over-correct into
+        // rejecting legitimate variety.
+        let mut extensions = build_extension(0x0A0A, &[]); // GREASE pattern
+        extensions.extend_from_slice(&build_extension(0x1A1A, &[]));
+        extensions.extend_from_slice(&build_sni_extension("example.com"));
+        extensions.extend_from_slice(&build_extension(0x2A2A, &[]));
+        let bytes = build_client_hello(&extensions);
+        assert_eq!(
+            extract_sni(&bytes),
             SniOutcome::Cleartext {
                 host: "example.com".into()
             }
