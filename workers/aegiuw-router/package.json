@@ -1,8 +1,8 @@
 {
-  "name": "aegis-router",
+  "name": "aegiuw-router",
   "version": "0.1.0",
   "private": true,
-  "description": "Aegiuw edge router: stateless Cloudflare Worker that ingests isolate requests from aegis-daemon and orchestrates ephemeral sandbox sessions.",
+  "description": "Aegiuw edge router: stateless Cloudflare Worker that ingests isolate requests from aegiuw-daemon and orchestrates ephemeral sandbox sessions.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "src/index.ts",

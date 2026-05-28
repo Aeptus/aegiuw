@@ -3,17 +3,17 @@
 version = 3
 
 [[package]]
-name = "aegis-core"
+name = "aegiuw-core"
 version = "0.1.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
-name = "aegis-daemon"
+name = "aegiuw-daemon"
 version = "0.1.0"
 dependencies = [
- "aegis-core",
+ "aegiuw-core",
  "anyhow",
 ]
 

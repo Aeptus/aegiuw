@@ -20,8 +20,8 @@ Monorepo, Cargo workspace, Worker scaffold, CI (Rust + Worker), Apache-2.0 licen
 
 **Components:**
 - macOS Network Extension (`NEAppProxyProvider`) — first platform per **B9**.
-- `aegis-core::sni` — bounds-checked TLS ClientHello parser.
-- `aegis-core::quic_initial` — QUIC Initial-packet SNI parser (per **C15**).
+- `aegiuw-core::sni` — bounds-checked TLS ClientHello parser.
+- `aegiuw-core::quic_initial` — QUIC Initial-packet SNI parser (per **C15**).
 - Optional WebExtension (Chrome / Firefox / Safari) that supplies the exact URL + opener context (per **C13** / **C16**).
 - HTTP/80 host extraction (per **C18**).
 
@@ -45,7 +45,7 @@ Monorepo, Cargo workspace, Worker scaffold, CI (Rust + Worker), Apache-2.0 licen
 - Tranco top-10k brand list bundled (**D21**).
 - Unicode confusables + punycode fold-down before Levenshtein (**D23**).
 - High-abuse-TLD list as offline newly-registered proxy (**D24**).
-- `aegis-core::verdict` — already scaffolded; deny-by-default folding.
+- `aegiuw-core::verdict` — already scaffolded; deny-by-default folding.
 
 **Decisions baked in:**
 - Threshold ≤ 2, no per-org tunability (**D22**).
@@ -184,13 +184,13 @@ Monorepo, Cargo workspace, Worker scaffold, CI (Rust + Worker), Apache-2.0 licen
 
 ## Cross-cutting tracks (run in parallel with layers)
 
-**T1. Rename `aegis-*` → `aegiuw-*`** (queued — **A1**).
+**T1. Rename `aegiuw-*` → `aegiuw-*`** (queued — **A1**).
 
 **T2. License switch Apache 2.0 → MPL-2.0** (pending confirmation — **N75**).
 
 **T3. Distribution & installers** — macOS .pkg, Windows .msi, Linux .deb/.rpm/AUR/Flatpak, brew tap, auto-update, MDM profiles (**N78** / **O82–O85**).
 
-**T4. Shared types via WASM** — compile `aegis-core` to WASM for use in the worker (**N76**).
+**T4. Shared types via WASM** — compile `aegiuw-core` to WASM for use in the worker (**N76**).
 
 **T5. Test infrastructure** — ClientHello/QUIC fixtures, sandbox E2E via Playwright, cargo-fuzz on parsers (**N81**).
 
@@ -200,4 +200,4 @@ Monorepo, Cargo workspace, Worker scaffold, CI (Rust + Worker), Apache-2.0 licen
 
 ## Suggested next implementation step
 
-The narrowest valuable next slice that unblocks meaningful progress without depending on any of the **TBC** items is **Layer 1 — SNI parsing**. It's pure logic in `aegis-core::sni`, no privileges, no Cloudflare, no rename impact, no license impact. Implementing it gives the daemon the first piece of real "see the wire" capability.
+The narrowest valuable next slice that unblocks meaningful progress without depending on any of the **TBC** items is **Layer 1 — SNI parsing**. It's pure logic in `aegiuw-core::sni`, no privileges, no Cloudflare, no rename impact, no license impact. Implementing it gives the daemon the first piece of real "see the wire" capability.

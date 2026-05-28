@@ -1,6 +1,6 @@
 # Product Requirement Document (PRD)
 
-**Project Codename:** Project Aegis (Version 2.5) — repository name **Aegiuw**
+**Project Codename:** Project Aegiuw (Version 2.5) — repository name **Aegiuw**
 **Document Status:** Production Ready
 **Licensing Model:** Core Engine (AGPL-3.0-or-later) + Commercial Extension (proprietary SaaS Layer)
 **Target Unit Economics:** End-User Price: $1.30 / user / month | Target COGS: $0.26 / user / month | PTIVR (Profit Margin): 80%
@@ -13,11 +13,11 @@
 
 ## Section 1: System Architecture & Components
 
-Project Aegis splits the compute and security verification pipelines into three
+Project Aegiuw splits the compute and security verification pipelines into three
 distinct architectural layers to maximize local device performance and utilize
 Cloudflare's serverless edge.
 
-### 1.1 Local End-User Daemon (`aegis-daemon`)
+### 1.1 Local End-User Daemon (`aegiuw-daemon`)
 
 - **Technical Stack:** Native Rust (compiled for x86_64 and ARM64 across Windows, macOS, Linux).
 - **System Privilege:** Persistent background daemon (systemd on Linux, launchd on macOS, Windows Service on Windows) with elevated network configuration privileges.
@@ -29,12 +29,12 @@ Cloudflare's serverless edge.
   - **Condition A (Native Path):** If the extracted domain exists in the local cryptographically signed `allowed_cache.json`, the daemon transparently bridges the TCP stream directly to the physical NIC. The native browser establishes a normal connection.
   - **Condition B (Isolate Path):** If the domain is unknown, newly registered, or flags heuristic risks, the daemon intercepts the connection, drops the native packets, and marshals the target URL into an encrypted HTTPS POST stream forwarded to the Cloudflare Worker interface.
 
-### 1.2 Serverless Edge Router (`aegis-router`)
+### 1.2 Serverless Edge Router (`aegiuw-router`)
 
 - **Technical Stack:** Cloudflare Workers on V8 Isolate infrastructure, TypeScript.
-- **Routing Logic:** Stateless traffic controller. Ingests requests from `aegis-daemon`, appends telemetry, reads the organization's rules out of Cloudflare KV, and orchestrates session deployment via the Cloudflare Browser Run API.
+- **Routing Logic:** Stateless traffic controller. Ingests requests from `aegiuw-daemon`, appends telemetry, reads the organization's rules out of Cloudflare KV, and orchestrates session deployment via the Cloudflare Browser Run API.
 
-### 1.3 Ephemeral Secure Sandbox Container (`aegis-cage`)
+### 1.3 Ephemeral Secure Sandbox Container (`aegiuw-cage`)
 
 - **Technical Stack:** Cloudflare Browser Run API + custom V8-compiled KasmVNC pipeline.
 - **Mechanism:** Spins up an instant, headless instance of Chromium inside a stateless Cloudflare Container.
@@ -48,8 +48,8 @@ Cloudflare's serverless edge.
 
 - **FR-1.1 (Single-Command Infrastructure Deployment):** The repository must include a pre-configured, production-ready `wrangler.jsonc`. Open-source users deploy the full edge routing infrastructure to their personal Cloudflare accounts via `wrangler deploy`.
 - **FR-1.2 (Local Agent Bootstrapping):** Distributable via native package managers:
-  - macOS: `brew install aegis-security/tap/aegis-daemon`
-  - Linux/Windows: `cargo install aegis-daemon`
+  - macOS: `brew install aegiuw/tap/aegiuw-daemon`
+  - Linux/Windows: `cargo install aegiuw-daemon`
 
 ### 2.2 Local Dynamic Risk Engine (No-API Heuristics)
 
@@ -69,7 +69,7 @@ Rust agent runs localized mathematical heuristics in parallel:
 
 ---
 
-## Section 3: Commercial Subscription Infrastructure (Aegis-Enterprise)
+## Section 3: Commercial Subscription Infrastructure (Aegiuw-Enterprise)
 
 A decoupled layer managing monetization, automated token authentication, and
 infrastructure scaling for customers on the managed $1.30/user/month subscription.
@@ -79,7 +79,7 @@ infrastructure scaling for customers on the managed $1.30/user/month subscriptio
 Uses Asymmetric Web Crypto Verification at the Edge to avoid database round trips.
 
 ```
-[ Local Rust Daemon ] ──(Presents Device JWT)──► [ Aegis Commercial Cloud Worker ]
+[ Local Rust Daemon ] ──(Presents Device JWT)──► [ Aegiuw Commercial Cloud Worker ]
                                                           │
                    ┌──────────────────────────────────────┴───────────────────────────┐
                    ▼ (Signature Valid & Under Seat Cap)                                 ▼ (Signature Fails / Expired)
@@ -94,7 +94,7 @@ Uses Asymmetric Web Crypto Verification at the Edge to avoid database round trip
   - **Sub-Millisecond Clearance:** The commercial Worker validates the signature via `crypto.subtle.verify` against the customer's public key in global memory. If the signature matches, the timestamp is valid, and the hardware hash is registered within the company's Stripe seat limit, the sandbox opens.
 - **CR-1.2 Self-Hosted Threat Feed Paywall (The Intel Sync):**
   - **Encrypted Storage Bucket:** A master Cloudflare KV database holds real-time zero-hour definitions of active AitM phishing proxy networks, encrypted with a rotating daily symmetric key.
-  - **Sync Cron Task:** A Cron Trigger on the customer's self-hosted worker queries `https://api.aegis.security/v1/intel-sync` every 10 minutes.
+  - **Sync Cron Task:** A Cron Trigger on the customer's self-hosted worker queries `https://api.aegiuw.security/v1/intel-sync` every 10 minutes.
   - **Gatekeeper Verification:** The licensing worker checks the license token against the active Stripe billing registry. If paid, it returns the current day's decryption key; if unpaid/delinquent, it returns `403 Forbidden`, causing the client to fall back to basic local Levenshtein formulas.
 
 ### 3.2 Enterprise Scaling & Extension Capabilities ("The Superpowers")
@@ -117,4 +117,4 @@ Uses Asymmetric Web Crypto Verification at the Edge to avoid database round trip
 
 The open-source repository ships with the `wrangler.jsonc` bindings to Cloudflare's
 serverless edge primitives (Browser Run, KV whitelist cache, R2 quarantine vault).
-See [`workers/aegis-router/wrangler.jsonc`](../workers/aegis-router/wrangler.jsonc).
+See [`workers/aegiuw-router/wrangler.jsonc`](../workers/aegiuw-router/wrangler.jsonc).

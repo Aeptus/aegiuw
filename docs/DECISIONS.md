@@ -8,7 +8,7 @@ ADR-style log consolidating the 85 product/architecture questions surfaced durin
 
 ## A. Product, strategy, naming
 
-**A1. Rename `aegis-*` → `aegiuw-*` across the codebase.** *Confirmed.* Affects crate names, identifiers, brew tap, worker name, KV namespace, and any `aegis.security`-style URLs. Will land as a dedicated sweep commit.
+**A1. Rename `aegiuw-*` → `aegiuw-*` across the codebase.** *Confirmed.* Affects crate names, identifiers, brew tap, worker name, KV namespace, and any `aegiuw.security`-style URLs. Will land as a dedicated sweep commit.
 
 **A2. Canonical domain.** **TBC.** Candidates: `aegiuw.com`, `aegiuw.security`, `aegiuw.app`. Trademark search pending before locking.
 
@@ -200,7 +200,7 @@ This directly satisfies your J56 requirement ("highest level of education, every
 
 > ⚠️ **TBC — license switch.** The current LICENSE is Apache 2.0, which is **permissive, not copyleft**. **Recommendation: switch core to MPL-2.0** — file-level copyleft, business-friendly, enterprise-tolerated, used by Mozilla / Rust. AGPL-3.0 is the stronger option (network copyleft, blocks SaaS clones from staying closed) but chills enterprise adoption hard. Awaiting your call.
 
-**N76. Shared Rust ↔ TS types.** **Recommendation: compile `aegis-core` to WASM** for use inside the worker. Single source of truth; eliminates risk of Rust/TS schema drift.
+**N76. Shared Rust ↔ TS types.** **Recommendation: compile `aegiuw-core` to WASM** for use inside the worker. Single source of truth; eliminates risk of Rust/TS schema drift.
 
 **N77. Monorepo tooling.** **Recommendation:** pnpm workspaces for JS/TS + Cargo workspace for Rust + `packages/shared/` for TS schemas + a `justfile` for cross-stack tasks. No turborepo until needed.
 
@@ -244,4 +244,4 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 - **A2** Canonical domain (trademark search needed).
 - **N75** License switch Apache 2.0 → MPL-2.0 (or AGPL-3.0, or keep Apache).
-- **A1 (scheduled)** Rename `aegis-*` → `aegiuw-*` sweep, queued as the next dedicated commit.
+- **A1 (scheduled)** Rename `aegiuw-*` → `aegiuw-*` sweep, queued as the next dedicated commit.

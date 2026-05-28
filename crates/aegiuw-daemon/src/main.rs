@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! `aegis-daemon` — the privileged local agent.
+//! `aegiuw-daemon` — the privileged local agent.
 //!
 //! Scaffold status: the privileged networking layer (TUN interface, routing-table
 //! configuration, SNI peeking, and the actual fork to NIC-vs-edge) is **not yet
 //! implemented** — see the `TODO(FR-1)` markers below. What *is* wired up is the
-//! pure decision pipeline from [`aegis_core`], so running this binary shows how a
+//! pure decision pipeline from [`aegiuw_core`], so running this binary shows how a
 //! domain flows from heuristics to a fork decision.
 
-use aegis_core::heuristics::{context, levenshtein};
-use aegis_core::risk::{RiskSignal, Verdict};
+use aegiuw_core::heuristics::{context, levenshtein};
+use aegiuw_core::risk::{RiskSignal, Verdict};
 
 /// Inputs the daemon will eventually gather from the live connection.
 struct Connection<'a> {
@@ -23,7 +23,7 @@ struct Connection<'a> {
 
 /// Run the local, no-API heuristics for one connection and fold them into a verdict.
 ///
-/// This is the daemon-side composition of the [`aegis_core`] heuristics: an
+/// This is the daemon-side composition of the [`aegiuw_core`] heuristics: an
 /// allow-cache hit short-circuits to [`Verdict::safe`]; otherwise we collect every
 /// signal and let [`Verdict::evaluate`] decide.
 fn assess(conn: &Connection<'_>) -> Verdict {
@@ -49,13 +49,13 @@ fn assess(conn: &Connection<'_>) -> Verdict {
 
 fn main() -> anyhow::Result<()> {
     println!(
-        "aegis-daemon v{} — Aegiuw local agent",
+        "aegiuw-daemon v{} — Aegiuw local agent",
         env!("CARGO_PKG_VERSION")
     );
     println!("status: scaffold — TUN interface + SNI fork not yet implemented (FR-1.x)\n");
 
     // Demo the decision pipeline against a few representative connections so the
-    // wiring between the daemon and aegis-core is observable. The real daemon
+    // wiring between the daemon and aegiuw-core is observable. The real daemon
     // replaces these literals with data peeked off the wire.
     let samples = [
         Connection {
@@ -89,7 +89,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // TODO(FR-1): bring up the TUN interface, program the OS routing tables to
-    // capture outbound :443, peek the ClientHello via aegis_core::sni::extract_sni,
+    // capture outbound :443, peek the ClientHello via aegiuw_core::sni::extract_sni,
     // and for ISOLATE verdicts marshal the URL to the edge router over HTTPS.
     Ok(())
 }
@@ -97,7 +97,7 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aegis_core::risk::RiskLevel;
+    use aegiuw_core::risk::RiskLevel;
 
     #[test]
     fn cached_domain_takes_native_path() {

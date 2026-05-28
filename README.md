@@ -32,15 +32,15 @@ Three layers, deliberately decoupled:
 
 | Layer | Component | Stack | Lives in |
 |-------|-----------|-------|----------|
-| 1. Local agent | `aegis-daemon` | Native Rust (Win/macOS/Linux) | `crates/aegis-daemon` |
-| — risk logic | `aegis-core` | Pure Rust (lib, WASM-friendly) | `crates/aegis-core` |
-| 2. Edge router | `aegis-router` | TypeScript on Cloudflare Workers | `workers/aegis-router` |
-| 3. Sandbox | `aegis-cage` | Cloudflare Browser Rendering | (driven by the router) |
+| 1. Local agent | `aegiuw-daemon` | Native Rust (Win/macOS/Linux) | `crates/aegiuw-daemon` |
+| — risk logic | `aegiuw-core` | Pure Rust (lib, WASM-friendly) | `crates/aegiuw-core` |
+| 2. Edge router | `aegiuw-router` | TypeScript on Cloudflare Workers | `workers/aegiuw-router` |
+| 3. Sandbox | `aegiuw-cage` | Cloudflare Browser Rendering | (driven by the router) |
 
 ```
- native browser ──► aegis-daemon ──┬─(trusted)──► NIC ──► internet
+ native browser ──► aegiuw-daemon ──┬─(trusted)──► NIC ──► internet
  (port 443 via TUN)                │
-                                   └─(unknown)──► aegis-router (Worker)
+                                   └─(unknown)──► aegiuw-router (Worker)
                                                       └──► ephemeral sandbox
                                                               └─► read-only stream ──► local viewer
 ```
@@ -50,10 +50,10 @@ Three layers, deliberately decoupled:
 ```
 .
 ├── crates/
-│   ├── aegis-core/     # pure risk heuristics: Levenshtein, context, SNI parsing, verdicts
-│   └── aegis-daemon/   # privileged background agent (TUN, fork logic) — depends on aegis-core
+│   ├── aegiuw-core/     # pure risk heuristics: Levenshtein, context, SNI parsing, verdicts
+│   └── aegiuw-daemon/   # privileged background agent (TUN, fork logic) — depends on aegiuw-core
 ├── workers/
-│   └── aegis-router/   # Cloudflare Worker: stateless traffic controller + sandbox orchestration
+│   └── aegiuw-router/   # Cloudflare Worker: stateless traffic controller + sandbox orchestration
 ├── docs/
 │   └── PRD.md          # product requirements (source of the FR-/CR-/NFR- IDs referenced in code)
 └── .github/workflows/  # CI for both the Rust and Worker stacks
@@ -65,14 +65,14 @@ Three layers, deliberately decoupled:
 
 ```bash
 cargo build            # build the workspace
-cargo test             # run aegis-core unit tests
-cargo run -p aegis-daemon
+cargo test             # run aegiuw-core unit tests
+cargo run -p aegiuw-daemon
 ```
 
 ### Edge router (Cloudflare Worker)
 
 ```bash
-cd workers/aegis-router
+cd workers/aegiuw-router
 npm install
 npm run typecheck      # tsc --noEmit
 npm run dev            # local Worker via wrangler
@@ -80,7 +80,7 @@ npm run dev            # local Worker via wrangler
 # To deploy you must first create the bound resources and paste their IDs
 # into wrangler.jsonc (see the comments in that file):
 #   npx wrangler kv namespace create LOCAL_SAFE_CACHE
-#   npx wrangler r2 bucket create aegis-quarantine-vault
+#   npx wrangler r2 bucket create aegiuw-quarantine-vault
 npm run deploy         # wrangler deploy  (FR-1.1: single-command edge deploy)
 ```
 
@@ -104,11 +104,11 @@ implementation, not whether it's possible.
 
 ## Licensing
 
-The **Core Engine** (`crates/`, `workers/aegis-router/`) is licensed under the
+The **Core Engine** (`crates/`, `workers/aegiuw-router/`) is licensed under the
 [GNU Affero General Public License v3.0 or later](LICENSE). This is a strong
 copyleft license: anyone who modifies Aegiuw and offers it over a network must
 make the modified source available to that network's users (AGPL §13).
 
-The **Aegis-Enterprise** commercial layer (billing, warm pools, managed threat
+The **Aegiuw-Enterprise** commercial layer (billing, warm pools, managed threat
 intel, SIEM streaming) is distributed under separate commercial terms and is
 **not** covered by the AGPL. See [`NOTICE`](NOTICE).

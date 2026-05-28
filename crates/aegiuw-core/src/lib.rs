@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! # aegis-core
+//! # aegiuw-core
 //!
 //! The pure decision logic of the Aegiuw local agent. Everything here is free of
 //! I/O, OS calls, and `unsafe` (see the `forbid(unsafe_code)` lint in Cargo.toml),

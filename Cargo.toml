@@ -1,22 +1,22 @@
 # Workspace root for the Aegiuw local agent.
 #
-# `aegis-core`  — pure, dependency-light risk logic (no I/O, no OS calls).
+# `aegiuw-core`  — pure, dependency-light risk logic (no I/O, no OS calls).
 #                 Unit-testable and WASM-friendly so the same logic can later
 #                 run inside the Cloudflare Worker.
-# `aegis-daemon`— the privileged background binary (TUN interface, SNI fork,
-#                 daemonization). Depends on aegis-core.
+# `aegiuw-daemon`— the privileged background binary (TUN interface, SNI fork,
+#                 daemonization). Depends on aegiuw-core.
 [workspace]
 resolver = "2"
 members = [
-    "crates/aegis-core",
-    "crates/aegis-daemon",
+    "crates/aegiuw-core",
+    "crates/aegiuw-daemon",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
-repository = "https://github.com/aegis-security/aegiuw"
+repository = "https://github.com/aegiuw/aegiuw"
 authors = ["The Aegiuw Authors"]
 rust-version = "1.82"
 

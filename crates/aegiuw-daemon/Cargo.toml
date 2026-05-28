@@ -1,0 +1,17 @@
+[package]
+name = "aegiuw-daemon"
+description = "Aegiuw local background agent: virtual network interface, SNI fork logic, and the bridge to the edge router. Depends on aegiuw-core for risk decisions."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "aegiuw-daemon"
+path = "src/main.rs"
+
+[dependencies]
+aegiuw-core = { path = "../aegiuw-core" }
+anyhow = { workspace = true }
