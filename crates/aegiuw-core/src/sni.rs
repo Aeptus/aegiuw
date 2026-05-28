@@ -590,6 +590,20 @@ fn parse_server_name_extension(data: &[u8]) -> ServerNameOutcome {
         return ServerNameOutcome::Malformed;
     }
 
+    // RFC 1035 §2.3.4 / §3.1: DNS hostnames have a 253-octet presentation-form
+    // ceiling (255 octets on the wire minus the leading length byte and the
+    // final terminator), and each label is bounded to 63 octets. Anything
+    // larger is either a typo, a misconfigured client, or an attacker
+    // probing for length-handling bugs. SNI backlog H3.
+    const MAX_HOSTNAME_LEN: usize = 253;
+    const MAX_LABEL_LEN: usize = 63;
+    if host_str.len() > MAX_HOSTNAME_LEN {
+        return ServerNameOutcome::Malformed;
+    }
+    if host_str.split('.').any(|label| label.len() > MAX_LABEL_LEN) {
+        return ServerNameOutcome::Malformed;
+    }
+
     // RFC 6066 §3: "Literal IPv4 and IPv6 addresses are not permitted in
     // HostName." SNI backlog H1. We use Rust's `IpAddr::from_str` because
     // it handles every legal IPv4/IPv6 textual form (dotted quad, full and
@@ -1007,6 +1021,50 @@ mod tests {
         ];
         let bytes = build_client_hello(&bad_extensions);
         assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    // ── DNS length bounds (H3, RFC 1035 §2.3.4 / §3.1) ───────────────────────
+
+    #[test]
+    fn rejects_hostname_longer_than_253_bytes() {
+        // Construct a 254-byte hostname out of single-char labels so the
+        // total-length rule fires rather than the label-length rule:
+        //   "a." repeated 126 times = 252 chars, plus "aa" = 254 chars total.
+        // Each label is ≤ 2 chars (well under the 63-byte label cap).
+        let mut host = "a.".repeat(126);
+        host.push_str("aa");
+        assert_eq!(host.len(), 254);
+        let bytes = build_client_hello(&build_sni_extension(&host));
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn accepts_hostname_at_253_byte_boundary() {
+        // 253 bytes is the spec maximum and a common ceiling in real DNS.
+        let mut host = "a.".repeat(126);
+        host.push('a');
+        assert_eq!(host.len(), 253);
+        let bytes = build_client_hello(&build_sni_extension(&host));
+        assert_eq!(extract_sni(&bytes), SniOutcome::Cleartext { host });
+    }
+
+    #[test]
+    fn rejects_label_longer_than_63_bytes() {
+        // 64-char label embedded in an otherwise tiny hostname — label rule
+        // must fire even when the total stays well under 253.
+        let label = "a".repeat(64);
+        let host = format!("{label}.example.com");
+        let bytes = build_client_hello(&build_sni_extension(&host));
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn accepts_label_at_63_byte_boundary() {
+        // 63 bytes is the spec maximum for a single label (RFC 1035 §2.3.4).
+        let label = "a".repeat(63);
+        let host = format!("{label}.example.com");
+        let bytes = build_client_hello(&build_sni_extension(&host));
+        assert_eq!(extract_sni(&bytes), SniOutcome::Cleartext { host });
     }
 
     // ── Empty-hostname rejection (H2, RFC 6066 §3) ───────────────────────────
