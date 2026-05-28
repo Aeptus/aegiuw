@@ -110,8 +110,15 @@
 //!
 //! ## Non-goals
 //!
-//! - **DTLS** (UDP-framed TLS): out of scope — the QUIC parser (Layer 1
-//!   sibling) handles UDP separately.
+//! - **DTLS** (UDP-framed TLS, RFC 9147): out of scope — the QUIC parser
+//!   (Layer 1 sibling) handles UDP-based encrypted transports separately.
+//!   DTLS records share the leading `content_type=22` byte with TLS but have
+//!   a different 13-byte header (version + epoch + sequence + length) and
+//!   a 12-byte handshake-fragment header — so DTLS bytes happen to fail one
+//!   of our subsequent checks (record-length-mismatch, wrong handshake type,
+//!   or wrong `legacy_version`) and surface as [`SniOutcome::Malformed`].
+//!   This is *incidental* rejection rather than explicit DTLS detection;
+//!   the test suite pins it so the failure mode can't drift. (SNI backlog C14.)
 //! - **SSL 2.0 ClientHello format**: explicitly returns `Malformed`. SSL
 //!   2.0 had no SNI anyway and is long-obsolete.
 //! - **TLS renegotiation ClientHello** *inside* an active session: the
@@ -978,6 +985,39 @@ mod tests {
         ];
         let bytes = build_client_hello(&bad_extensions);
         assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    // ── DTLS bytes rejection (C14, RFC 9147, out-of-scope by design) ─────────
+
+    #[test]
+    fn dtls_1_2_record_is_rejected_as_malformed() {
+        // DTLS 1.2 record layout: content_type | version(2) | epoch(2) |
+        // sequence(6) | length(2). Shares the leading 0x16 byte with TLS but
+        // the bytes that follow don't match our subsequent expectations
+        // (legacy_version != 0x0303, or the handshake-type byte falls into
+        // the middle of the epoch/sequence field). Either way → Malformed.
+        let dtls = [
+            0x16, // content_type = handshake
+            0xfe, 0xfd, // version = DTLS 1.2
+            0x00, 0x01, // epoch = 1
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // sequence
+            0x00, 0x10, // length = 16
+            0x01, // looks like client_hello type byte…
+            0x00, 0x00, 0x0C, // u24 length (12)
+            // body that won't pass our legacy_version == 0x0303 check:
+            0xfe, 0xfd, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA,
+        ];
+        assert_eq!(extract_sni(&dtls), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn dtls_1_3_unified_header_is_rejected_as_malformed() {
+        // DTLS 1.3 introduces a "unified" record header whose first byte has
+        // distinctive top bits (0b001_xxxxx) — for the purpose of this
+        // rejection test, anything that doesn't equal CONTENT_TYPE_HANDSHAKE
+        // is enough. We use the canonical short-header pattern 0x2F.
+        let dtls13 = [0x2F, 0x00, 0x00, 0x00, 0x00];
+        assert_eq!(extract_sni(&dtls13), SniOutcome::Malformed);
     }
 
     // ── SSL 2.0 ClientHello rejection (C13, RFC 6176) ────────────────────────
