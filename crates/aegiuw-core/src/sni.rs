@@ -490,10 +490,11 @@ fn parse_server_name_extension(data: &[u8]) -> ServerNameOutcome {
     let mut entries = Cursor::new(list);
 
     if entries.remaining() < 3 {
-        // Empty list or too-short first entry: spec-violating but distinct
-        // from a duplicate. T10 will tighten "empty list" to Malformed; for
-        // now treat as Skip to preserve existing test behavior.
-        return ServerNameOutcome::Skip;
+        // RFC 6066 §3 defines `ServerNameList<1..2^16-1>` — non-empty by type
+        // construction. An empty list, or a list too short to contain even one
+        // ServerName entry (name_type + u16 host_len + 0 bytes = 3), is a
+        // clear spec violation; refuse the whole ClientHello. SNI backlog C10.
+        return ServerNameOutcome::Malformed;
     }
 
     let Some(name_type) = entries.read_u8() else {
@@ -917,6 +918,32 @@ mod tests {
                   // …no payload follows…
         ];
         let bytes = build_client_hello(&bad_extensions);
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    // ── Empty ServerNameList rejection (C10, RFC 6066 §3) ────────────────────
+
+    #[test]
+    fn rejects_server_name_extension_with_empty_list() {
+        // ServerNameList<1..2^16-1> requires at least one entry; an explicit
+        // empty list (list_length = 0) is malformed.
+        let mut ext = Vec::new();
+        ext.extend_from_slice(&EXT_SERVER_NAME.to_be_bytes());
+        ext.extend_from_slice(&[0x00, 0x02]); // ext_data_length = 2 (just the list-length prefix)
+        ext.extend_from_slice(&[0x00, 0x00]); // ServerNameList length = 0 (empty)
+        let bytes = build_client_hello(&ext);
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn rejects_server_name_extension_with_one_byte_list() {
+        // Too short to contain even one entry header (1 byte instead of >= 3).
+        let mut ext = Vec::new();
+        ext.extend_from_slice(&EXT_SERVER_NAME.to_be_bytes());
+        ext.extend_from_slice(&[0x00, 0x03]); // ext_data_length = 3
+        ext.extend_from_slice(&[0x00, 0x01]); // list_length = 1
+        ext.extend_from_slice(&[0x00]); // garbage 1-byte entry
+        let bytes = build_client_hello(&ext);
         assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
     }
 
