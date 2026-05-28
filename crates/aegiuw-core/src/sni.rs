@@ -248,6 +248,33 @@ pub fn extract_sni(bytes: &[u8]) -> SniOutcome {
     parse_handshake_message(&handshake).unwrap_or(SniOutcome::Malformed)
 }
 
+/// Returns `true` if any label in `host` is a punycode A-label (a
+/// case-insensitive `xn--` prefix, per RFC 5890 §2.3.2.1).
+///
+/// IDN-encoded hostnames are pure ASCII LDH on the wire (so they pass the
+/// H5 character check inside [`extract_sni`]) but originate from a
+/// non-ASCII Unicode name. Surfacing this distinction is useful for
+/// observability: IDN traffic disproportionately includes homograph and
+/// typosquat attempts, so a "host is IDN" flag is a useful telemetry
+/// input — even though it isn't a block signal on its own.
+///
+/// # Examples
+///
+/// ```
+/// use aegiuw_core::is_idn_host;
+///
+/// assert!(is_idn_host("xn--caf-dma.com"));            // primary label
+/// assert!(is_idn_host("foo.xn--zb9c.example.com"));   // any label triggers
+/// assert!(is_idn_host("XN--CAF-DMA.com"));             // case-insensitive
+/// assert!(!is_idn_host("example.com"));
+/// assert!(!is_idn_host("xn-test.com"));                // needs *two* hyphens
+/// assert!(!is_idn_host(""));
+/// ```
+pub fn is_idn_host(host: &str) -> bool {
+    host.split('.')
+        .any(|label| label.len() >= 4 && label.as_bytes()[..4].eq_ignore_ascii_case(b"xn--"))
+}
+
 /// Verify that the SNI in a ClientHello sent *after* a HelloRetryRequest
 /// matches the SNI in the first ClientHello, as required by RFC 8446 §4.1.4.
 ///
@@ -1054,6 +1081,46 @@ mod tests {
         ];
         let bytes = build_client_hello(&bad_extensions);
         assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    // ── IDN / punycode detection (H7, RFC 5890 §2.3.2.1) ─────────────────────
+
+    #[test]
+    fn is_idn_host_detects_lowercase_xn_prefix() {
+        assert!(is_idn_host("xn--caf-dma.com"));
+    }
+
+    #[test]
+    fn is_idn_host_detects_uppercase_xn_prefix() {
+        // RFC 5890 §5: A-label matching is case-insensitive. Our H6 contract
+        // preserves wire case, so the *detector* must lowercase-compare.
+        assert!(is_idn_host("XN--CAF-DMA.com"));
+        assert!(is_idn_host("Xn--Caf-Dma.com"));
+    }
+
+    #[test]
+    fn is_idn_host_detects_xn_in_subdomain() {
+        // Any label can be an A-label; not just the leftmost.
+        assert!(is_idn_host("foo.xn--zb9c.example.com"));
+    }
+
+    #[test]
+    fn is_idn_host_returns_false_for_plain_hostname() {
+        assert!(!is_idn_host("example.com"));
+    }
+
+    #[test]
+    fn is_idn_host_requires_double_hyphen() {
+        // `xn-` (single hyphen) is just a normal label that happens to
+        // start with "xn-". RFC 5890 requires *two* hyphens after the prefix.
+        assert!(!is_idn_host("xn-test.com"));
+        assert!(!is_idn_host("xn.com"));
+    }
+
+    #[test]
+    fn is_idn_host_handles_empty_and_short_inputs() {
+        assert!(!is_idn_host(""));
+        assert!(!is_idn_host("xn-")); // 3 chars, not enough for the prefix
     }
 
     // ── Case preservation (H6, RFC 4343 — but normalized upstream) ───────────

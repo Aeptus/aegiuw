@@ -20,5 +20,6 @@ pub mod sni;
 
 pub use risk::{RiskLevel, RiskSignal, Verdict};
 pub use sni::{
-    extract_sni, hrr_sni_consistent, parse_handshake_message, reassemble_handshake, SniOutcome,
+    extract_sni, hrr_sni_consistent, is_idn_host, parse_handshake_message, reassemble_handshake,
+    SniOutcome,
 };
