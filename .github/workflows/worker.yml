@@ -9,6 +9,7 @@ on:
     paths:
       - "workers/**"
       - ".github/workflows/worker.yml"
+  workflow_dispatch:
 
 jobs:
   typecheck:
