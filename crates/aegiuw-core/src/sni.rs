@@ -55,6 +55,64 @@
 //! cannot accidentally walk past the buffer end without a `?` short-circuit.
 //! Reassembly is bounded by [`MAX_HANDSHAKE_BYTES`] so an attacker cannot use
 //! a 16 MB handshake-length claim to drive unbounded allocation.
+//!
+//! # Contract
+//!
+//! What callers can rely on, and what they're responsible for. Doc-tests on
+//! each public function exercise the boundary cases below.
+//!
+//! ## Input expectations
+//!
+//! - A byte slice the caller has already buffered from a TCP stream (or
+//!   built in-memory). Zero-length is acceptable and yields
+//!   [`SniOutcome::Malformed`].
+//! - May contain **one or more** consecutive `content_type=22` TLS records
+//!   carrying the ClientHello (and only the ClientHello — see Non-goals).
+//! - **No streaming API.** We do not signal "need more bytes." A caller
+//!   reading from a socket must accumulate until either the handshake
+//!   length is satisfied or a sensible timeout fires; calling us with
+//!   partial input simply yields `Malformed`.
+//! - Bytes past the end of the first complete handshake message are
+//!   ignored. A 0-RTT EarlyData record coalesced after the ClientHello is
+//!   harmless.
+//!
+//! ## Output guarantees
+//!
+//! - **Total function.** Every input slice maps to exactly one
+//!   [`SniOutcome`] variant. There is no `Result`, no `Option`, no panic
+//!   path; that's the whole point of the four-variant sum type.
+//! - **Allocation-bounded.** Reassembly will never allocate more than
+//!   [`MAX_HANDSHAKE_BYTES`] regardless of attacker-controlled length
+//!   claims. The cap is checked before the allocation grows past it.
+//! - **Panic-free.** No input bytes can trigger a panic, out-of-bounds
+//!   read, or integer overflow — enforced by the
+//!   `unsafe_code = "forbid"` lint and the [`Cursor`] discipline. Verified
+//!   by the test suite; a `cargo-fuzz` harness is on the backlog (`S1`).
+//! - **Side-effect free.** Reads `&[u8]`, returns owned data. No globals,
+//!   no I/O.
+//!
+//! ## Performance budget
+//!
+//! - Per PRD §1.1, the daemon's overall SNI peek must complete in
+//!   ≤ 1.5 ms. This parser is linear in input length and is typically
+//!   single-digit microseconds on a real ClientHello; quadratic behavior
+//!   on any adversarial input is a regression.
+//!
+//! ## Non-goals
+//!
+//! - **DTLS** (UDP-framed TLS): out of scope — the QUIC parser (Layer 1
+//!   sibling) handles UDP separately.
+//! - **SSL 2.0 ClientHello format**: explicitly returns `Malformed`. SSL
+//!   2.0 had no SNI anyway and is long-obsolete.
+//! - **TLS renegotiation ClientHello** *inside* an active session: the
+//!   daemon peeks only at connection start.
+//! - **ECH inner ClientHello**: per `DECISIONS.C14`, ECH presence is
+//!   surfaced as [`SniOutcome::Encrypted`] and routes to Isolate; we
+//!   never attempt to decrypt the inner CH.
+//! - **Hostname normalization**: case-folding, punycode decoding, eTLD+1
+//!   extraction, and Unicode confusables handling are the responsibility
+//!   of the Layer 1 "normalize + enrich" step, not this parser. We
+//!   report `Cleartext { host }` verbatim from the wire.
 
 use serde::{Deserialize, Serialize};
 
@@ -129,6 +187,26 @@ pub enum SniOutcome {
 /// of the four [`SniOutcome`] variants — see that type's docs for how each
 /// routes upstream. ECH presence always wins over a visible SNI per
 /// `DECISIONS.C14`.
+///
+/// # Examples
+///
+/// Boundary cases enforced by the contract:
+///
+/// ```
+/// use aegiuw_core::{extract_sni, SniOutcome};
+///
+/// // Empty input is Malformed (total function — never panics, never None).
+/// assert_eq!(extract_sni(&[]), SniOutcome::Malformed);
+///
+/// // Wrong content type (0x17 = application_data) is Malformed.
+/// assert_eq!(
+///     extract_sni(&[0x17, 0x03, 0x01, 0x00, 0x00]),
+///     SniOutcome::Malformed,
+/// );
+///
+/// // Truncated record (only the content-type byte) is Malformed.
+/// assert_eq!(extract_sni(&[0x16]), SniOutcome::Malformed);
+/// ```
 pub fn extract_sni(bytes: &[u8]) -> SniOutcome {
     let Some(handshake) = reassemble_handshake(bytes) else {
         return SniOutcome::Malformed;
@@ -154,6 +232,24 @@ pub fn extract_sni(bytes: &[u8]) -> SniOutcome {
 /// - the input ends before the handshake message is complete.
 ///
 /// Bytes past the end of the first complete handshake message are ignored.
+///
+/// # Examples
+///
+/// ```
+/// use aegiuw_core::reassemble_handshake;
+///
+/// // Empty input: no records, nothing to assemble.
+/// assert_eq!(reassemble_handshake(&[]), None);
+///
+/// // Wrong content type: refuse to assemble (Traefik-CVE class defense).
+/// assert_eq!(
+///     reassemble_handshake(&[0x17, 0x03, 0x01, 0x00, 0x01, 0xFF]),
+///     None,
+/// );
+///
+/// // Truncated record header: refuse.
+/// assert_eq!(reassemble_handshake(&[0x16, 0x03]), None);
+/// ```
 pub fn reassemble_handshake(records: &[u8]) -> Option<Vec<u8>> {
     let mut cursor = Cursor::new(records);
     let mut handshake_buf: Vec<u8> = Vec::new();
@@ -213,6 +309,23 @@ pub fn reassemble_handshake(records: &[u8]) -> Option<Vec<u8>> {
 ///
 /// Made `pub` so the upcoming QUIC parser can feed already-stripped
 /// CRYPTO-frame bytes here without going through record reassembly first.
+///
+/// # Examples
+///
+/// ```
+/// use aegiuw_core::{parse_handshake_message, SniOutcome};
+///
+/// // Empty input: not even a handshake header.
+/// assert_eq!(parse_handshake_message(&[]), None);
+///
+/// // Wrong handshake type (0x02 = ServerHello, not ClientHello): observed
+/// // as Malformed, not None — the bytes *are* a handshake, just not one
+/// // we can extract SNI from.
+/// assert_eq!(
+///     parse_handshake_message(&[0x02, 0x00, 0x00, 0x00]),
+///     Some(SniOutcome::Malformed),
+/// );
+/// ```
 pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome> {
     let mut c = Cursor::new(handshake);
 
