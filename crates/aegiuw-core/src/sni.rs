@@ -122,6 +122,11 @@ pub const EXT_SERVER_NAME: u16 = 0x0000;
 /// Extension type for `encrypted_client_hello` (draft-ietf-tls-esni, IANA).
 pub const EXT_ENCRYPTED_CLIENT_HELLO: u16 = 0xfe0d;
 
+/// Extension type for `pre_shared_key` (RFC 8446 §4.2.11). The spec requires
+/// this to be the **last** extension in any ClientHello that uses it; a CH
+/// where another extension follows `pre_shared_key` is malformed.
+pub const EXT_PRE_SHARED_KEY: u16 = 0x0029;
+
 /// TLS record content type for handshake messages.
 pub const CONTENT_TYPE_HANDSHAKE: u8 = 22;
 
@@ -407,8 +412,17 @@ pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome> {
     // `encrypted_client_hello` case (C4) in one place. A small `Vec` is faster
     // than a `HashSet` for the realistic ~15–20 extension count per CH.
     let mut seen_ext_types: Vec<u16> = Vec::new();
+    // RFC 8446 §4.2.11: pre_shared_key MUST be the last extension. If we've
+    // already seen one and we're about to read another, that's a violation.
+    // SNI backlog C11.
+    let mut psk_seen = false;
 
     while ext.remaining() >= 4 {
+        if psk_seen {
+            // Any extension after pre_shared_key violates the "MUST be last"
+            // rule. Refuse the whole ClientHello.
+            return Some(SniOutcome::Malformed);
+        }
         let ext_type = ext.read_u16()?;
         let ext_data = ext.read_u16_prefixed()?;
 
@@ -416,6 +430,9 @@ pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome> {
             return Some(SniOutcome::Malformed);
         }
         seen_ext_types.push(ext_type);
+        if ext_type == EXT_PRE_SHARED_KEY {
+            psk_seen = true;
+        }
 
         match ext_type {
             EXT_ENCRYPTED_CLIENT_HELLO => {
@@ -919,6 +936,52 @@ mod tests {
         ];
         let bytes = build_client_hello(&bad_extensions);
         assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    // ── pre_shared_key position rule (C11, RFC 8446 §4.2.11) ─────────────────
+
+    /// Build a minimal `pre_shared_key` extension. The payload is opaque to
+    /// our parser; only the type and ordering matter.
+    fn build_psk_extension() -> Vec<u8> {
+        let payload = [0x00, 0x04, 0xAA, 0xAA, 0xAA, 0xAA, 0x00, 0x21, 0xBB]; // arbitrary
+        let mut ext = Vec::new();
+        ext.extend_from_slice(&EXT_PRE_SHARED_KEY.to_be_bytes());
+        ext.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        ext.extend_from_slice(&payload);
+        ext
+    }
+
+    #[test]
+    fn rejects_pre_shared_key_followed_by_another_extension() {
+        // PSK before SNI: violates "MUST be last." Other extensions appearing
+        // after PSK must reject the whole ClientHello.
+        let mut extensions = build_psk_extension();
+        extensions.extend_from_slice(&build_sni_extension("example.com"));
+        let bytes = build_client_hello(&extensions);
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn accepts_pre_shared_key_as_last_extension() {
+        // SNI first, PSK last — the legal ordering. Parser must accept and
+        // continue to extract the SNI correctly.
+        let mut extensions = build_sni_extension("example.com");
+        extensions.extend_from_slice(&build_psk_extension());
+        let bytes = build_client_hello(&extensions);
+        assert_eq!(
+            extract_sni(&bytes),
+            SniOutcome::Cleartext {
+                host: "example.com".into()
+            }
+        );
+    }
+
+    #[test]
+    fn accepts_pre_shared_key_as_only_extension() {
+        // PSK with nothing else: parses successfully, no SNI → NotFound.
+        let extensions = build_psk_extension();
+        let bytes = build_client_hello(&extensions);
+        assert_eq!(extract_sni(&bytes), SniOutcome::NotFound);
     }
 
     // ── Empty ServerNameList rejection (C10, RFC 6066 §3) ────────────────────
