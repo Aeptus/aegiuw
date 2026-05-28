@@ -11,6 +11,11 @@ members = [
     "crates/aegiuw-core",
     "crates/aegiuw-daemon",
 ]
+# Exclude the fuzz harness — it requires the nightly toolchain and pulls in
+# `libfuzzer-sys`; we keep the main workspace stable-only.
+exclude = [
+    "crates/aegiuw-core/fuzz",
+]
 
 [workspace.package]
 version = "0.1.0"

@@ -1,0 +1,44 @@
+# aegiuw-core-fuzz — cargo-fuzz harnesses for the SNI parser.
+#
+# Deliberately **excluded from the main workspace** (see the top-level
+# Cargo.toml's `[workspace] exclude = …`) because cargo-fuzz requires the
+# nightly toolchain and pulls in `libfuzzer-sys`. The main workspace stays
+# stable-only; this crate is invoked on demand via `cargo +nightly fuzz`.
+
+[package]
+name = "aegiuw-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+aegiuw-core = { path = ".." }
+
+# Each fuzz target is its own `[[bin]]` so libFuzzer can build them
+# independently and the coverage feedback stays focused per entry point.
+
+[[bin]]
+name = "extract_sni"
+path = "fuzz_targets/extract_sni.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reassemble_handshake"
+path = "fuzz_targets/reassemble_handshake.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_handshake_message"
+path = "fuzz_targets/parse_handshake_message.rs"
+test = false
+doc = false
+bench = false

@@ -83,6 +83,18 @@ npm run dev            # local Worker via wrangler
 npm run deploy         # wrangler deploy  (FR-1.1: single-command edge deploy)
 ```
 
+### Fuzzing the SNI parser
+
+```bash
+rustup toolchain install nightly   # one-time
+cargo install cargo-fuzz           # one-time
+
+cd crates/aegiuw-core/fuzz
+cargo +nightly fuzz run extract_sni -- -max_total_time=10 -timeout=1
+```
+
+Three targets cover `extract_sni`, `reassemble_handshake`, and `parse_handshake_message`. Full instructions and the "what to do on a crash" runbook live in [`crates/aegiuw-core/fuzz/README.md`](crates/aegiuw-core/fuzz/README.md).
+
 ### Quality gates (git hooks)
 
 ```bash
