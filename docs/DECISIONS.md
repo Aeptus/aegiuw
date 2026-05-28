@@ -8,9 +8,9 @@ ADR-style log consolidating the 85 product/architecture questions surfaced durin
 
 ## A. Product, strategy, naming
 
-**A1. Rename `aegiuw-*` → `aegiuw-*` across the codebase.** *Confirmed.* Affects crate names, identifiers, brew tap, worker name, KV namespace, and any `aegiuw.security`-style URLs. Will land as a dedicated sweep commit.
+**A1. Rename `aegis-*` → `aegiuw-*` across the codebase.** **Done.** The original project codename was *Project Aegis*; the chosen public identifier is `aegiuw`. The rename touched crate names, identifiers, brew tap path, worker name, KV namespace placeholder, and all internal references. Landed in commit `b13ae67`; Cargo.lock regenerated; `cargo test`, `clippy -D warnings`, and `tsc` all green.
 
-**A2. Canonical domain.** **TBC.** Candidates: `aegiuw.com`, `aegiuw.security`, `aegiuw.app`. Trademark search pending before locking.
+**A2. Canonical domain.** **TBC.** Availability check (2026-05-28, whois + DNS): **all five candidates currently unregistered** — `aegiuw.com`, `aegiuw.security`, `aegiuw.app`, `aegiuw.io`, `aegiuw.dev`, `aegiuw.org`, `aegiuw.co`. Trademark search still pending before locking. Defaults assumed in code use `aegiuw.example` (RFC 2606) and `api.aegiuw.security` where a candidate had to be picked.
 
 **A3. Target segment.** SMB and mid-market. *Confirmed.*
 
@@ -196,9 +196,11 @@ This directly satisfies your J56 requirement ("highest level of education, every
 
 ## N. Architecture, repo, engineering
 
-**N75. Open-core boundary.** *"Copyleft monorepo for core + worker; private repo for managed infra."* *Confirmed in intent.* 
+**N75. Open-core boundary + license.** *"Copyleft monorepo for core + worker; private repo for managed infra."* *Confirmed.*
 
-> ⚠️ **TBC — license switch.** The current LICENSE is Apache 2.0, which is **permissive, not copyleft**. **Recommendation: switch core to MPL-2.0** — file-level copyleft, business-friendly, enterprise-tolerated, used by Mozilla / Rust. AGPL-3.0 is the stronger option (network copyleft, blocks SaaS clones from staying closed) but chills enterprise adoption hard. Awaiting your call.
+**License:** **AGPL-3.0-or-later** for the open-source core + worker. *Done* (commit `819ac3f`): canonical AGPL-3.0 text fetched from gnu.org installed as `LICENSE`; `NOTICE` updated; per-file `SPDX-License-Identifier: AGPL-3.0-or-later` headers added to every source file; workspace `license` field updated. Section 13 (network use) explicitly applies: any modified version offered over a network must make its source available to network users — the deliberate strong-copyleft choice to block closed SaaS forks.
+
+**Repo layout:** core (`crates/`, `workers/aegiuw-router/`) lives in this public monorepo under AGPL; the managed Aegiuw-Enterprise infrastructure (billing, warm pools, Stripe webhook handler, residential proxy if ever shipped, SIEM streaming code) lives in a separate **private** repository under proprietary terms.
 
 **N76. Shared Rust ↔ TS types.** **Recommendation: compile `aegiuw-core` to WASM** for use inside the worker. Single source of truth; eliminates risk of Rust/TS schema drift.
 
@@ -242,6 +244,6 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Pending confirmations
 
-- **A2** Canonical domain (trademark search needed).
-- **N75** License switch Apache 2.0 → MPL-2.0 (or AGPL-3.0, or keep Apache).
-- **A1 (scheduled)** Rename `aegiuw-*` → `aegiuw-*` sweep, queued as the next dedicated commit.
+- **A2** Canonical domain — registration target. All seven `aegiuw.{com,security,app,io,dev,org,co}` candidates currently unregistered; trademark search still owed before locking and acquiring.
+
+(A1 and N75 resolved in this branch — see entries above.)

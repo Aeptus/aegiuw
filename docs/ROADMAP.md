@@ -8,7 +8,7 @@ Bottom-to-top phased build plan. Each layer is a coherent unit of work with the 
 
 ## Layer 0 — Foundations ✅ complete
 
-Monorepo, Cargo workspace, Worker scaffold, CI (Rust + Worker), Apache-2.0 license *(scheduled to switch to MPL-2.0, see DECISIONS.N75)*, README, PRD, decision register.
+Monorepo, Cargo workspace, Worker scaffold, CI (Rust + Worker), **AGPL-3.0-or-later** license, README, PRD, decision register, and the full `aegis-*` → `aegiuw-*` rename.
 
 **Done:** `cargo test`, `cargo clippy -D warnings`, and `tsc --noEmit` all green.
 
@@ -184,9 +184,9 @@ Monorepo, Cargo workspace, Worker scaffold, CI (Rust + Worker), Apache-2.0 licen
 
 ## Cross-cutting tracks (run in parallel with layers)
 
-**T1. Rename `aegiuw-*` → `aegiuw-*`** (queued — **A1**).
+**T1. Rename `aegis-*` → `aegiuw-*`.** ✅ Done (commit `b13ae67`). All crates, worker, identifiers, env bindings, and prose now use `aegiuw`.
 
-**T2. License switch Apache 2.0 → MPL-2.0** (pending confirmation — **N75**).
+**T2. License switch to AGPL-3.0-or-later.** ✅ Done (commit `819ac3f`). Canonical AGPL-3.0 text from gnu.org installed as `LICENSE`; per-file SPDX headers added; `NOTICE` updated; workspace `license` field flipped.
 
 **T3. Distribution & installers** — macOS .pkg, Windows .msi, Linux .deb/.rpm/AUR/Flatpak, brew tap, auto-update, MDM profiles (**N78** / **O82–O85**).
 
