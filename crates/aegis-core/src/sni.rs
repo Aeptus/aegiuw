@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! SNI extraction from a raw TLS ClientHello (PRD §1.1).
 //!
 //! The daemon peeks at the first outbound TCP packets *before* relaying them, pulls

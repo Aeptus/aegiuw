@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! `aegis-daemon` — the privileged local agent.
 //!
 //! Scaffold status: the privileged networking layer (TUN interface, routing-table

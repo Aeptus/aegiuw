@@ -1,13 +1,31 @@
 Aegiuw — Remote Browser Isolation security engine
-Copyright 2026 The Aegiuw Authors
+Copyright (C) 2026 The Aegiuw Authors
 
-This product includes software developed by the Aegiuw project.
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at
+your option) any later version.
 
-The contents of the `crates/` and `workers/aegis-router/` directories form the
-open-source Core Engine and are licensed under the Apache License, Version 2.0
-(see LICENSE).
+This program is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
+License for more details.
 
-The commercial extension layer (Aegis-Enterprise: SaaS billing, Durable Object
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+----
+
+Open-source vs. commercial scope:
+
+The contents of `crates/` and `workers/aegiuw-router/` form the open-source
+Core Engine and are licensed under AGPL-3.0-or-later (see LICENSE).
+
+AGPL Section 13 ("Remote Network Interaction") applies: anyone who modifies
+this software and runs it on a network server must offer the modified source
+to the users of that server.
+
+The commercial extension layer (Aegiuw-Enterprise: SaaS billing, Durable Object
 warm-pooling, managed threat-intelligence sync, SIEM streaming, and related
-components) is NOT covered by the Apache 2.0 license and is distributed under
-separate commercial terms.
+components) is NOT distributed under the AGPL and is licensed under separate
+commercial terms.

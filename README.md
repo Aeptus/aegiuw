@@ -104,7 +104,11 @@ implementation, not whether it's possible.
 
 ## Licensing
 
-The **Core Engine** (`crates/`, `workers/aegis-router/`) is licensed under
-[Apache 2.0](LICENSE). The **Aegis-Enterprise** commercial layer (billing, warm
-pools, managed threat intel, SIEM streaming) is distributed under separate
-commercial terms. See [`NOTICE`](NOTICE).
+The **Core Engine** (`crates/`, `workers/aegis-router/`) is licensed under the
+[GNU Affero General Public License v3.0 or later](LICENSE). This is a strong
+copyleft license: anyone who modifies Aegiuw and offers it over a network must
+make the modified source available to that network's users (AGPL §13).
+
+The **Aegis-Enterprise** commercial layer (billing, warm pools, managed threat
+intel, SIEM streaming) is distributed under separate commercial terms and is
+**not** covered by the AGPL. See [`NOTICE`](NOTICE).

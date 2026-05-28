@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! FR-2.1 — Levenshtein typo-squat detection.
 //!
 //! Compares an SNI domain against a dictionary of known brands. A small edit

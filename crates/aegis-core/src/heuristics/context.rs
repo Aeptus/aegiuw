@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! FR-2.3 — Launch-context tracking.
 //!
 //! The same URL is far more dangerous when it arrives via an email client or PDF

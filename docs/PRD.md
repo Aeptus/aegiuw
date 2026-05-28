@@ -2,7 +2,7 @@
 
 **Project Codename:** Project Aegis (Version 2.5) — repository name **Aegiuw**
 **Document Status:** Production Ready
-**Licensing Model:** Core Engine (Apache 2.0) + Commercial Extension (SaaS Layer)
+**Licensing Model:** Core Engine (AGPL-3.0-or-later) + Commercial Extension (proprietary SaaS Layer)
 **Target Unit Economics:** End-User Price: $1.30 / user / month | Target COGS: $0.26 / user / month | PTIVR (Profit Margin): 80%
 
 > This document is the canonical source for the requirement IDs (`FR-*`, `CR-*`,

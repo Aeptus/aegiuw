@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! # aegis-core
 //!
 //! The pure decision logic of the Aegiuw local agent. Everything here is free of

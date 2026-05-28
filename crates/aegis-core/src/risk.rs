@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Risk verdicts: the data model that every heuristic feeds into, and the policy
 //! that folds a set of signals into one decision.
 

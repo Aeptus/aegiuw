@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 /**
  * aegis-router — the stateless edge traffic controller (PRD §1.2).
  *
