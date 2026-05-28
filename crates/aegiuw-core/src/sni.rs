@@ -229,6 +229,38 @@ pub fn extract_sni(bytes: &[u8]) -> SniOutcome {
     parse_handshake_message(&handshake).unwrap_or(SniOutcome::Malformed)
 }
 
+/// Verify that the SNI in a ClientHello sent *after* a HelloRetryRequest
+/// matches the SNI in the first ClientHello, as required by RFC 8446 §4.1.4.
+///
+/// Returns `Some(true)` if both inputs extract to the same `Cleartext { host }`,
+/// `Some(false)` if they extract *different* hosts, and `None` when either
+/// side wasn't a clean `Cleartext` outcome — `ECH`, `NotFound`, or `Malformed`
+/// either side makes the comparison meaningless and the caller should fall
+/// back to whatever the original isolate-vs-native decision was.
+///
+/// This is a stateless helper; the daemon is responsible for *identifying*
+/// the second ClientHello in a given connection (a HelloRetryRequest came
+/// between them) and passing both blobs here.
+///
+/// # Examples
+///
+/// ```
+/// use aegiuw_core::{hrr_sni_consistent, SniOutcome, extract_sni};
+///
+/// // Two empty inputs are both Malformed, so the comparison is meaningless.
+/// assert_eq!(hrr_sni_consistent(&[], &[]), None);
+///
+/// // Identical inputs that both parse cleanly return Some(true)/(false) only
+/// // when both extract to Cleartext.
+/// assert_eq!(extract_sni(&[]), SniOutcome::Malformed);
+/// ```
+pub fn hrr_sni_consistent(first: &[u8], second: &[u8]) -> Option<bool> {
+    match (extract_sni(first), extract_sni(second)) {
+        (SniOutcome::Cleartext { host: a }, SniOutcome::Cleartext { host: b }) => Some(a == b),
+        _ => None,
+    }
+}
+
 /// Walk one or more TLS records and concatenate their `content_type=22`
 /// fragment payloads into a single handshake byte stream.
 ///
@@ -936,6 +968,41 @@ mod tests {
         ];
         let bytes = build_client_hello(&bad_extensions);
         assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    // ── HRR SNI consistency (C12, RFC 8446 §4.1.4) ───────────────────────────
+
+    #[test]
+    fn hrr_sni_consistent_matches_identical_hosts() {
+        let a = build_client_hello(&build_sni_extension("example.com"));
+        let b = build_client_hello(&build_sni_extension("example.com"));
+        assert_eq!(hrr_sni_consistent(&a, &b), Some(true));
+    }
+
+    #[test]
+    fn hrr_sni_consistent_flags_changed_host() {
+        // RFC 8446 §4.1.4: the second ClientHello MUST carry the same SNI.
+        // A changed host means either a buggy client or a stitched-together
+        // attack.
+        let a = build_client_hello(&build_sni_extension("first.example.com"));
+        let b = build_client_hello(&build_sni_extension("second.example.com"));
+        assert_eq!(hrr_sni_consistent(&a, &b), Some(false));
+    }
+
+    #[test]
+    fn hrr_sni_consistent_returns_none_when_either_side_is_not_cleartext() {
+        // ECH on one side: we can't tell what the real SNI was, so the
+        // comparison is meaningless (None) — caller falls back to the
+        // standalone outcome of each parse.
+        let mut a_exts = build_sni_extension("example.com");
+        a_exts.extend_from_slice(&build_ech_extension());
+        let a = build_client_hello(&a_exts);
+        let b = build_client_hello(&build_sni_extension("example.com"));
+        assert_eq!(hrr_sni_consistent(&a, &b), None);
+
+        // Malformed on either side: also None.
+        assert_eq!(hrr_sni_consistent(&[], &b), None);
+        assert_eq!(hrr_sni_consistent(&b, &[]), None);
     }
 
     // ── pre_shared_key position rule (C11, RFC 8446 §4.2.11) ─────────────────
