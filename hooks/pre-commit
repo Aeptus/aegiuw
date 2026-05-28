@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# aegiuw pre-commit hook — thin shim. All policy lives in
+# scripts/quality/registry.mjs; this file only invokes the runner.
+set -e
+exec node scripts/quality/runner.mjs --mode=staged "$@"
