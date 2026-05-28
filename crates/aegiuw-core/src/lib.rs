@@ -19,4 +19,4 @@ pub mod risk;
 pub mod sni;
 
 pub use risk::{RiskLevel, RiskSignal, Verdict};
-pub use sni::{extract_sni, SniOutcome};
+pub use sni::{extract_sni, parse_handshake_message, reassemble_handshake, SniOutcome};

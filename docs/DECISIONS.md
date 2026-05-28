@@ -249,3 +249,7 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 - **A2** Canonical domain — registration target. All seven `aegiuw.{com,security,app,io,dev,org,co}` candidates currently unregistered; trademark search still owed before locking and acquiring.
 
 (A1 and N75 resolved in this branch — see entries above.)
+
+## Implemented backlog items (from `note.md` / SNI improvements)
+
+- **C1 (P0) Multi-record handshake reassembly.** Done. `aegiuw_core::reassemble_handshake(records: &[u8]) -> Option<Vec<u8>>` walks consecutive `content_type=22` TLS records, concatenates their fragment payloads, and returns the handshake byte stream truncated to the first complete handshake message. Reassembly is bounded by `MAX_HANDSHAKE_BYTES = 64 KiB` to refuse adversarial `u24 length = 0xFFFFFF` claims. Mixed-content-type streams return `None` (caller surfaces `SniOutcome::Malformed`) — defeats the Traefik `GHSA-wvvq-wgcr-9q48` class. `extract_sni` now routes record bytes → reassemble → `parse_handshake_message` (also public, for QUIC reuse). 8 new tests including a `1-byte-per-record` worst-case (the kubernetes ingress-nginx pattern) and an `app-data smuggled mid-handshake` adversarial case.
