@@ -131,6 +131,16 @@ pub const HANDSHAKE_TYPE_CLIENT_HELLO: u8 = 1;
 /// NameType value for `host_name` inside a ServerName (RFC 6066 §3).
 const NAME_TYPE_HOST_NAME: u8 = 0;
 
+/// The wire value a TLS 1.2 *or* 1.3 ClientHello MUST carry in its
+/// `legacy_version` field (RFC 8446 §4.1.2). TLS 1.3 uses the
+/// `supported_versions` extension for actual negotiation; the legacy field is
+/// pinned to 0x0303 to dodge "version intolerance" middleboxes.
+///
+/// SSL 3.0 (`0x0300`), TLS 1.0 (`0x0301`), and TLS 1.1 (`0x0302`) are
+/// deprecated by RFC 8996. A `legacy_version > 0x0303` (e.g. the literal
+/// `0x0304`) is an implementation bug per RFC 8446 §4.1.2.
+pub const TLS_LEGACY_VERSION: u16 = 0x0303;
+
 /// Upper bound on the handshake bytes we'll accumulate during reassembly.
 ///
 /// A realistic post-quantum ClientHello sits around 6–8 KB. 64 KB is generous
@@ -336,7 +346,14 @@ pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome> {
     c.read_u24()?; // handshake body length (we trust the caller's reassembly)
 
     // ── ClientHello body ───────────────────────────────────────────────────
-    c.read_u16()?; // legacy_version
+    //
+    // RFC 8446 §4.1.2: a TLS 1.2 or 1.3 ClientHello MUST set legacy_version =
+    // 0x0303. SSL 3.0, TLS 1.0, and TLS 1.1 are deprecated by RFC 8996 — any
+    // such wire value means we're looking at obsolete or hostile traffic and
+    // should refuse to extract a fork decision from it. SNI backlog C5.
+    if c.read_u16()? != TLS_LEGACY_VERSION {
+        return Some(SniOutcome::Malformed);
+    }
     c.read_slice(32)?; // random
     c.read_u8_prefixed()?; // legacy_session_id
     c.read_u16_prefixed()?; // cipher_suites
@@ -584,13 +601,30 @@ mod tests {
     // share the same handshake bytes as the single-record tests.
 
     /// Build the handshake-message bytes (HandshakeType + u24 length + body).
+    /// Uses spec-compliant defaults: `legacy_version=0x0303`, single null
+    /// compression method.
     fn build_handshake_message(extensions: &[u8]) -> Vec<u8> {
+        build_handshake_message_custom(extensions, TLS_LEGACY_VERSION, &[0x00])
+    }
+
+    /// Build a handshake message with a custom `legacy_version` (used by the
+    /// C5 tests that exercise obsolete TLS versions).
+    fn build_handshake_message_with_version(extensions: &[u8], legacy_version: u16) -> Vec<u8> {
+        build_handshake_message_custom(extensions, legacy_version, &[0x00])
+    }
+
+    fn build_handshake_message_custom(
+        extensions: &[u8],
+        legacy_version: u16,
+        compression_methods: &[u8],
+    ) -> Vec<u8> {
         let mut body = Vec::new();
-        body.extend_from_slice(&[0x03, 0x03]); // legacy_version = TLS 1.2
+        body.extend_from_slice(&legacy_version.to_be_bytes());
         body.extend_from_slice(&[0xAA; 32]); // random
         body.push(0); // legacy_session_id length = 0
         body.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]); // cipher_suites
-        body.extend_from_slice(&[0x01, 0x00]); // compression_methods: null
+        body.push(compression_methods.len() as u8);
+        body.extend_from_slice(compression_methods);
         body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
         body.extend_from_slice(extensions);
 
@@ -887,6 +921,59 @@ mod tests {
         let records = build_fragmented_records(&handshake, &[split]);
         assert_eq!(
             extract_sni(&records),
+            SniOutcome::Cleartext {
+                host: "example.com".into()
+            }
+        );
+    }
+
+    // ── legacy_version validation (C5, RFC 8446 §4.1.2, RFC 8996) ────────────
+
+    #[test]
+    fn rejects_legacy_version_tls_1_0() {
+        // TLS 1.0 (0x0301) is deprecated by RFC 8996 and not a valid
+        // legacy_version per RFC 8446 §4.1.2.
+        let handshake = build_handshake_message_with_version(&[], 0x0301);
+        let record = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        assert_eq!(extract_sni(&record), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn rejects_legacy_version_tls_1_1() {
+        // TLS 1.1 (0x0302) is also deprecated by RFC 8996.
+        let handshake = build_handshake_message_with_version(&[], 0x0302);
+        let record = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        assert_eq!(extract_sni(&record), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn rejects_legacy_version_ssl_3_0() {
+        // SSL 3.0 (0x0300) was already deprecated by RFC 7568 (2015).
+        let handshake = build_handshake_message_with_version(&[], 0x0300);
+        let record = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        assert_eq!(extract_sni(&record), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn rejects_legacy_version_above_tls_1_2() {
+        // RFC 8446 §4.1.2 explicitly forbids `legacy_version > 0x0303`. A
+        // ClientHello with 0x0304 in the legacy field is a buggy or hostile
+        // sender; the real version negotiation lives in `supported_versions`.
+        let handshake = build_handshake_message_with_version(&[], 0x0304);
+        let record = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        assert_eq!(extract_sni(&record), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn accepts_legacy_version_0x0303() {
+        // Positive control: the one legal value still parses successfully.
+        let handshake = build_handshake_message_with_version(
+            &build_sni_extension("example.com"),
+            TLS_LEGACY_VERSION,
+        );
+        let record = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        assert_eq!(
+            extract_sni(&record),
             SniOutcome::Cleartext {
                 host: "example.com".into()
             }
