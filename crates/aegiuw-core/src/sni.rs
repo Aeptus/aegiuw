@@ -3480,6 +3480,83 @@ mod tests {
         assert!(!meta.ech_present);
     }
 
+    // ── T4: ECH-bearing CH (Cloudflare convention) ───────────────────────────
+    //
+    // The Cloudflare ECH deployment convention (per cloudflare.com/learning/
+    // performance/what-is-ssl-pre-shared-keys/, plus the public Encrypted
+    // Client Hello rollout post): every Cloudflare-hosted ECH connection
+    // presents `cloudflare-ech.com` as the *outer* SNI. The inner CH (with
+    // the real host) is encrypted under the ECH config.
+    //
+    // T4 pins the parser's behaviour on this canonical shape:
+    //   - SniOutcome::Encrypted (NOT Cleartext with the decoy host);
+    //   - meta.host == None (DECISIONS.C14 masking);
+    //   - is_cloudflare_ech_outer flags the outer SNI from a fresh parse
+    //     (when callers explicitly look at it pre-encryption);
+    //   - meta.ech_present == true.
+
+    /// Build a Chrome-shaped CH with ECH present + the Cloudflare outer-SNI
+    /// convention. Models the exact wire shape we'd see in production.
+    fn build_cloudflare_ech_clienthello() -> Vec<u8> {
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_extension(0x0A0A, &[])); // Chrome opening GREASE
+                                                               // Outer SNI is the Cloudflare ECH convention sentinel.
+        exts.extend_from_slice(&build_sni_extension(CLOUDFLARE_ECH_OUTER_SNI));
+        exts.extend_from_slice(&build_extension(0x0017, &[])); // extended_master_secret
+        exts.extend_from_slice(&build_supported_versions_extension(&[0x0304, 0x0303]));
+        exts.extend_from_slice(&build_signature_algorithms_extension(&[
+            0x0403, 0x0804, 0x0401,
+        ]));
+        exts.extend_from_slice(&build_supported_groups_extension(&[0x11ec, 0x001d, 0x0017]));
+        exts.extend_from_slice(&build_key_share_extension(&[
+            (0x11ec, &[0xAA; 1216]),
+            (0x001d, &[0xBB; 32]),
+        ]));
+        exts.extend_from_slice(&build_alpn_extension(&[b"h2", b"http/1.1"]));
+        exts.extend_from_slice(&build_ec_point_formats_extension(&[0]));
+        // ECH outer extension — placeholder body (real ECH has a config_id
+        // + KEM-encrypted inner CH; parser doesn't need to read those).
+        exts.extend_from_slice(&build_extension(EXT_ENCRYPTED_CLIENT_HELLO, &[0x00]));
+        let mut ciphers: Vec<u16> = Vec::new();
+        ciphers.push(0x0A0A);
+        ciphers.extend_from_slice(TLS_13_CIPHERS);
+        build_clienthello_custom_ciphers(&exts, &ciphers)
+    }
+
+    #[test]
+    fn t4_cloudflare_ech_ch_extracts_as_encrypted() {
+        let bytes = build_cloudflare_ech_clienthello();
+        // SniOutcome::Encrypted, not Cleartext — even though the wire shows
+        // cloudflare-ech.com, that's a decoy and policy must route to
+        // Isolate per DECISIONS.C14.
+        assert_eq!(extract_sni(&bytes), SniOutcome::Encrypted);
+    }
+
+    #[test]
+    fn t4_cloudflare_ech_metadata_masks_host_to_none() {
+        let bytes = build_cloudflare_ech_clienthello();
+        let meta = parse_client_hello_full(&bytes).expect("CF-ECH CH parses");
+        assert!(meta.ech_present, "ech_present must fire");
+        assert!(
+            meta.host.is_none(),
+            "host must be masked when ECH is present"
+        );
+        // Sanity: the underlying CH shape is otherwise Chrome-ish.
+        assert!(meta.has_post_quantum_key_share());
+        assert!(meta.offers(AlpnProtocol::Http2));
+    }
+
+    #[test]
+    fn t4_cloudflare_ech_outer_sni_detector_recognises_sentinel() {
+        // The O5 detector works on host strings *before* ECH masking. We
+        // verify the sentinel matches our constant — the daemon may want
+        // to count "outer SNI was Cloudflare's" for telemetry even though
+        // the parsed metadata legitimately hides it from the host field.
+        assert!(is_cloudflare_ech_outer(CLOUDFLARE_ECH_OUTER_SNI));
+        assert!(is_cloudflare_ech_outer("Cloudflare-ECH.com")); // case-insensitive
+        assert!(!is_cloudflare_ech_outer("example.com"));
+    }
+
     // ── Trailing-bytes tolerance (C9, RFC 8446 §4) ───────────────────────────
 
     /// Local fixture: build a ClientHello whose handshake body has extra bytes

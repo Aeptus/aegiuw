@@ -252,6 +252,16 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **T4 (P1) ECH-bearing CH (Cloudflare convention).** Done. 3 tests + a `build_cloudflare_ech_clienthello` fixture modeling the canonical Cloudflare ECH wire shape: Chrome-shaped CH with `cloudflare-ech.com` as the outer SNI per Cloudflare's documented rollout (every Cloudflare-hosted ECH connection presents this exact sentinel).
+
+  **Contracts pinned:**
+  - `extract_sni` returns `SniOutcome::Encrypted` (NOT `Cleartext` carrying the decoy host). Policy must route to Isolate per DECISIONS.C14.
+  - `meta.host == None` even though the wire shows `cloudflare-ech.com` — the parser masks it.
+  - `meta.ech_present == true`.
+  - `is_cloudflare_ech_outer` (O5) still recognises the sentinel for telemetry purposes, including case-insensitive variants.
+
+  237 tests pass (was 234 — added 3). Clippy clean both feature sets.
+
 - **T3 (P1) Real-world ClientHello corpus (synthetic-realistic).** Done. 8 client-shape fixtures modeled after the documented behaviour of major real-world clients:
 
   | Fixture | Modeled after |
