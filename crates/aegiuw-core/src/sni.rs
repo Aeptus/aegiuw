@@ -244,10 +244,23 @@ pub enum SniOutcome {
 /// assert_eq!(extract_sni(&[0x16]), SniOutcome::Malformed);
 /// ```
 pub fn extract_sni(bytes: &[u8]) -> SniOutcome {
-    let Some(handshake) = reassemble_handshake(bytes) else {
-        return SniOutcome::Malformed;
+    // O1: emit one structured trace event per parse with the outcome kind,
+    // input size, and wall-clock duration. Downstream telemetry can group
+    // by `outcome` for per-variant counters (O2) and bucket `duration_us`
+    // for the parse-time histogram (O3).
+    let start = std::time::Instant::now();
+    let outcome = match reassemble_handshake(bytes) {
+        Some(handshake) => parse_handshake_message(&handshake).unwrap_or(SniOutcome::Malformed),
+        None => SniOutcome::Malformed,
     };
-    parse_handshake_message(&handshake).unwrap_or(SniOutcome::Malformed)
+    tracing::trace!(
+        target: "aegiuw_core::sni",
+        outcome = ?outcome,
+        byte_count = bytes.len(),
+        duration_us = start.elapsed().as_micros() as u64,
+        "extract_sni"
+    );
+    outcome
 }
 
 /// Returns `true` if any label in `host` is a punycode A-label (a

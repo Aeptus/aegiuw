@@ -13,6 +13,11 @@ unsafe_code = "forbid"
 
 [dependencies]
 serde = { workspace = true }
+# Structured observability for the SNI parser (SNI backlog O1). `tracing` is
+# the de-facto Rust observability framework; emitting events here lets the
+# daemon's Layer-1 subscriber pick them up without coupling the parser to
+# any specific exporter.
+tracing = { version = "0.1", default-features = false }
 
 [dev-dependencies]
 # Property testing for the SNI parser (SNI backlog S2). Complements the
