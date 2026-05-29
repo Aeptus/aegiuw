@@ -2918,6 +2918,127 @@ mod tests {
         );
     }
 
+    // ── T1: Fragmentation exhaustive fixture ─────────────────────────────────
+    //
+    // **Historical context.** Before C1's multi-record reassembly landed, the
+    // parser was single-record-only: any ClientHello split across two TLS
+    // records (a normal, RFC-permitted shape) would have returned
+    // `SniOutcome::Malformed`. That looks safe (we'd route to Isolate) but
+    // it's the exact Traefik CVE class — an attacker who can influence
+    // packet boundaries hides the SNI from the parser and the connection
+    // takes the wrong path. Post-C1 fragmentation is handled correctly.
+    //
+    // The tests below pin that the C1 fix holds across the *entire space*
+    // of 2-record splits (`t1_*_every_split_position_*`), across 3+ record
+    // splits (`t1_three_record_split_*`), and that the full
+    // `ClientHelloMetadata` surface from A1-A12 survives fragmentation
+    // identically to its single-record equivalent
+    // (`t1_full_metadata_equivalence_*`).
+
+    #[test]
+    fn t1_two_record_split_at_every_position_extracts_sni() {
+        // Exhaustive sweep over every internal split position. Pre-C1 every
+        // one of these would have returned Malformed; post-C1 they all must
+        // extract the host correctly. Iterating proves the reassembly is
+        // *uniformly* correct, not just for the convenient mid-point split.
+        let handshake = build_handshake_message(&build_sni_extension("example.com"));
+        for split in 1..handshake.len() {
+            let records = build_fragmented_records(&handshake, &[split]);
+            assert_eq!(
+                extract_sni(&records),
+                SniOutcome::Cleartext {
+                    host: "example.com".into()
+                },
+                "two-record split at byte {split} (of {}) failed",
+                handshake.len(),
+            );
+        }
+    }
+
+    #[test]
+    fn t1_two_record_split_at_every_position_reassembles_identically() {
+        // Tighter contract than SNI extraction: the reassembled bytes must
+        // equal the original handshake at every split position. This pins
+        // that reassembly is byte-perfect — no accidental padding, no
+        // accidental truncation, no off-by-one in the length field.
+        let handshake = build_handshake_message(&build_sni_extension("example.com"));
+        for split in 1..handshake.len() {
+            let records = build_fragmented_records(&handshake, &[split]);
+            let assembled = reassemble_handshake(&records)
+                .unwrap_or_else(|| panic!("split at {split} returned None"));
+            assert_eq!(
+                &*assembled,
+                &handshake[..],
+                "split at byte {split}: reassembled bytes differ from original",
+            );
+        }
+    }
+
+    #[test]
+    fn t1_three_record_split_extracts_sni() {
+        // Trisect at thirds. Pin that the multi-record path generalises
+        // beyond N=2 — the reassembly buffer accumulates correctly across
+        // arbitrary record counts as long as the total stays under
+        // MAX_HANDSHAKE_BYTES.
+        let handshake = build_handshake_message(&build_sni_extension("example.com"));
+        let third = handshake.len() / 3;
+        let two_thirds = (handshake.len() * 2) / 3;
+        let records = build_fragmented_records(&handshake, &[third, two_thirds]);
+        assert_eq!(
+            extract_sni(&records),
+            SniOutcome::Cleartext {
+                host: "example.com".into()
+            },
+        );
+    }
+
+    #[test]
+    fn t1_four_record_split_at_each_quarter_extracts_sni() {
+        // 4-record split for extra paranoia. The kubernetes ingress-nginx
+        // bug (the original C1 motivation) used 1-byte records — we cover
+        // that worst-case shape separately in
+        // `reassemble_handshake_assembles_many_tiny_fragments`. Here we just
+        // pin the canonical "small N" generalisation.
+        let handshake = build_handshake_message(&build_sni_extension("example.com"));
+        let len = handshake.len();
+        let splits = [len / 4, len / 2, (len * 3) / 4];
+        let records = build_fragmented_records(&handshake, &splits);
+        assert_eq!(
+            extract_sni(&records),
+            SniOutcome::Cleartext {
+                host: "example.com".into()
+            },
+        );
+    }
+
+    #[test]
+    fn t1_full_metadata_equivalence_single_vs_two_record_split() {
+        // A1-A12 surface contract: fragmented and single-record forms of
+        // the *same* ClientHello must produce *identical* ClientHelloMetadata.
+        // A regression that affected only the multi-record path (e.g. a Cow
+        // promotion bug that lost an extension during owned reassembly)
+        // would slip through SNI-only tests but trip this comparison.
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&build_alpn_extension(&[b"h2", b"http/1.1"]));
+        exts.extend_from_slice(&build_supported_versions_extension(&[0x0304, 0x0303]));
+        exts.extend_from_slice(&build_extension(EXT_KEY_SHARE, &[0x00, 0x00]));
+        let handshake = build_handshake_message(&exts);
+
+        // Single-record form.
+        let single = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        let single_meta = parse_client_hello_full(&single).expect("single parses");
+
+        // Two-record form, split mid-handshake.
+        let fragmented = build_fragmented_records(&handshake, &[handshake.len() / 2]);
+        let frag_meta = parse_client_hello_full(&fragmented).expect("fragmented parses");
+
+        // Identical metadata — including host (host comes Cow::Owned from
+        // the fragmented path and Cow::Borrowed from the single-record path,
+        // but PartialEq on Cow compares via Deref so they compare equal by
+        // value).
+        assert_eq!(single_meta, frag_meta);
+    }
+
     // ── Trailing-bytes tolerance (C9, RFC 8446 §4) ───────────────────────────
 
     /// Local fixture: build a ClientHello whose handshake body has extra bytes

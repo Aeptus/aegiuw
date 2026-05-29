@@ -252,6 +252,20 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **T1 (P0) Fragmentation exhaustive test fixture.** Done. Added a dedicated T1 block in `sni.rs`'s test module with 5 new tests pinning the C1 multi-record reassembly fix across a wider surface than the original C1 commit covered.
+
+  **Historical context** (captured as a block comment in the test source so future readers see it inline): pre-C1 the parser was single-record-only, so a ClientHello legitimately split across two TLS records — a routine, RFC-permitted shape — would have returned `SniOutcome::Malformed`. That looks safe (we'd route to Isolate) but it's the exact Traefik CVE class: an attacker who can influence packet boundaries hides the SNI and the connection takes the wrong path. The T1 fixture pins that the C1 fix holds across the full space of splits, not just the canonical mid-point.
+
+  **New tests:**
+  - `t1_two_record_split_at_every_position_extracts_sni` — exhaustive sweep over every internal byte position. Proves reassembly is *uniformly* correct, not just for the convenient mid-point split.
+  - `t1_two_record_split_at_every_position_reassembles_identically` — tighter contract: the reassembled bytes must equal the original handshake at every split. Catches off-by-one errors that SNI-extraction would miss (e.g. a stray padding byte that happens to live before the SNI extension).
+  - `t1_three_record_split_extracts_sni` and `t1_four_record_split_at_each_quarter_extracts_sni` — pin that the multi-record path generalises beyond N=2.
+  - `t1_full_metadata_equivalence_single_vs_two_record_split` — the strongest contract: fragmented and single-record forms of the *same* ClientHello must produce *identical* `ClientHelloMetadata`. A regression that affected only the multi-record path (e.g. a Cow promotion bug that lost an extension during owned reassembly) would slip through SNI-only tests but trip this comparison.
+
+  The pre-existing `reassemble_handshake_assembles_two_record_fragmentation`, `reassemble_handshake_assembles_many_tiny_fragments` (the kubernetes ingress-nginx 1-byte-per-record case), and `extract_sni_works_on_fragmented_two_record_client_hello` remain — T1 augments rather than replaces them.
+
+  **223 tests pass** (was 218 — added 5). Clippy clean both feature sets. The exhaustive sweep adds ~250 sub-test cases (handshake is ~150 bytes long) per `cargo test` run; total wall time impact is negligible.
+
 - **F5 (P3) `likely_launch_source` classifier — fallback for C16.** Done. Added `pub enum LaunchSource { Browser, Cli, Library, Unknown }` and `pub fn likely_launch_source(meta) -> LaunchSource` to `fingerprint.rs`.
 
   **Critical scope note (pinned in module docs):** the TLS handshake is made by the *browser process* regardless of which app launched it — Chrome opened by clicking a link in Outlook produces the same TLS fingerprint as Chrome opened from the dock. So we **cannot** distinguish browser-launched-by-email from browser-launched-by-user from the TLS fingerprint. F5 is a *partial* replacement for the broken PPID approach: it narrows the search space ("was it a browser at all?") without solving the launching-app question. The full "this came from email" answer still needs the WebExtension (per DECISIONS.C13) or a process-tree timing heuristic.
