@@ -262,6 +262,13 @@ pub fn extract_sni(bytes: &[u8]) -> SniOutcome {
     // input size, and wall-clock duration. Downstream telemetry can group
     // by `outcome` for per-variant counters (O2) and bucket `duration_us`
     // for the parse-time histogram (O3).
+    //
+    // Field contract:
+    //   outcome:     stable lowercase string (see `SniOutcome::kind()`)
+    //   byte_count:  usize, input slice length
+    //   duration_us: u64, wall-clock microseconds (matches PRD §1.1's
+    //                ≤ 1.5 ms = ≤ 1500 µs budget — downstream histograms
+    //                should bucket near {50, 100, 250, 500, 1000, 1500, 2500}).
     let start = std::time::Instant::now();
     let outcome = match reassemble_handshake(bytes) {
         Some(handshake) => parse_handshake_message(&handshake).unwrap_or(SniOutcome::Malformed),
