@@ -32,3 +32,9 @@ tracing = { version = "0.1", default-features = false }
 # cargo-fuzz harnesses by running on every `cargo test` rather than on
 # nightly-only external invocations.
 proptest = "1"
+# Benchmarks (SNI backlog P3). Run with `cargo bench -p aegiuw-core`.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "sni"
+harness = false
