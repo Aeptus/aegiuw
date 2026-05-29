@@ -320,6 +320,17 @@ pub struct ClientHelloMetadata<'a> {
     /// or pattern-match on classified values via
     /// [`ClientHelloMetadata::key_share_groups_classified`]. SNI backlog A4.
     pub key_share_groups: Option<Vec<u16>>,
+    /// `true` if a `pre_shared_key` extension (RFC 8446 §4.2.11) was
+    /// present. PSK in a ClientHello is the TLS 1.3 session-resumption
+    /// signal — a returning client offering a previously-issued ticket so
+    /// the server can short-circuit the full handshake. Useful as a
+    /// Layer-2 input: a PSK-resuming client likely already passed our
+    /// allow-list on the original handshake.
+    ///
+    /// We deliberately don't parse the PSK identities / binders — the
+    /// presence flag is the only signal Layer 2 needs and the body is
+    /// opaque to anyone but the resuming server. SNI backlog A5.
+    pub psk_present: bool,
 }
 
 /// Classified ALPN protocol identifier (SNI backlog A2).
@@ -1107,6 +1118,7 @@ pub fn parse_handshake_message_full(handshake: &[u8]) -> Option<ClientHelloMetad
         alpn_protocols: None,
         supported_versions: None,
         key_share_groups: None,
+        psk_present: false,
     };
     // P1: host borrows from the input `handshake` slice; no allocation.
     let mut sni_host: Option<&str> = None;
@@ -1139,6 +1151,11 @@ pub fn parse_handshake_message_full(handshake: &[u8]) -> Option<ClientHelloMetad
         seen_ext_types.push(ext_type);
         if ext_type == EXT_PRE_SHARED_KEY {
             psk_seen = true;
+            // A5: surface PSK presence on the metadata. The PSK-must-be-last
+            // enforcement uses `psk_seen` for control flow; this lifts the
+            // same signal onto the public struct so Layer 2 can detect TLS
+            // 1.3 session resumption.
+            meta.psk_present = true;
         }
 
         match ext_type {
@@ -1266,6 +1283,7 @@ pub fn parse_client_hello_full(bytes: &[u8]) -> Option<ClientHelloMetadata<'_>> 
                     .map(|v| v.into_iter().map(|c| Cow::Owned(c.into_owned())).collect()),
                 supported_versions: borrowed.supported_versions,
                 key_share_groups: borrowed.key_share_groups,
+                psk_present: borrowed.psk_present,
             })
         }
     }
@@ -3514,6 +3532,40 @@ mod tests {
         exts.extend_from_slice(&build_extension(EXT_KEY_SHARE, &body));
         let bytes = build_client_hello(&exts);
         assert_eq!(parse_client_hello_full(&bytes), None);
+    }
+
+    // ── A5: PSK presence ─────────────────────────────────────────────────────
+
+    #[test]
+    fn psk_present_true_when_pre_shared_key_extension_seen() {
+        // PSK must be the last extension (C11 rule), so SNI first then PSK.
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&build_psk_extension());
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(meta.psk_present, "PSK extension was sent");
+        // SNI extraction must still work in this case (regression guard
+        // since the A5 commit touches the same code path as C11).
+        assert_eq!(meta.host.as_deref(), Some("example.com"));
+    }
+
+    #[test]
+    fn psk_present_false_when_extension_absent() {
+        let bytes = build_client_hello(&build_sni_extension("example.com"));
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(!meta.psk_present);
+    }
+
+    #[test]
+    fn psk_present_with_no_other_extensions() {
+        // PSK as the only extension: psk_present must still be true and
+        // host falls back to None (no SNI sent). This pins that the A5
+        // signal doesn't depend on SNI being present.
+        let exts = build_psk_extension();
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(meta.psk_present);
+        assert!(meta.host.is_none());
     }
 
     #[test]

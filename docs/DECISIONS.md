@@ -252,6 +252,14 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **A5 (P2) Expose PSK presence on `ClientHelloMetadata`.** Done. Added `psk_present: bool` to `ClientHelloMetadata`. PSK in a ClientHello is the TLS 1.3 session-resumption signal — a returning client offering a previously-issued ticket so the server can short-circuit the full handshake. Useful Layer-2 input: a PSK-resuming client likely already passed our allow-list on the original handshake.
+
+  **Implementation:** trivial — we already detect `EXT_PRE_SHARED_KEY` for the C11 "PSK must be last" rule. The A5 commit just lifts that detection (`psk_seen`) onto the public struct (`meta.psk_present`). No new parser code.
+
+  **Why not parse the PSK identities / binders:** the body is opaque to anyone but the resuming server (identities are server-issued opaque tokens; binders are HMAC-keyed by the resumption secret). Parsing them would burn parser code for zero downstream signal. The presence flag is the only signal Layer 2 needs.
+
+  **Tests:** 3 new — PSK present in a normal CH (with SNI), PSK absent, PSK as only extension (no SNI). 153 tests pass (was 150). Clippy clean both feature sets.
+
 - **A4 (P2) Expose key_share group IDs + `KeyShareGroup` classification.** Done. Replaces A1's `key_share_present: bool` field with `key_share_groups: Option<Vec<u16>>` (the actual advertised NamedGroup IDs) and adds a classification enum so Layer 2 can fingerprint post-quantum hybrid clients without juggling wire codepoints. A1 was less than a day old with no external consumers, so the field swap is a safe break.
 
   **New public surface:**
