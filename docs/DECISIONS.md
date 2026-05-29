@@ -294,6 +294,30 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 - **S1 (P0) `cargo-fuzz` harness on the SNI parser.** Done. Added `crates/aegiuw-core/fuzz/` as a separate sub-crate (excluded from the workspace via `[workspace] exclude = ["crates/aegiuw-core/fuzz"]` because `cargo-fuzz` requires the nightly toolchain and pulls in `libfuzzer-sys`; the main workspace stays stable-only). Three fuzz targets cover the three public entry points: `extract_sni` (primary — exercises the whole record → handshake → SNI pipeline), `reassemble_handshake` (focused signal on the `MAX_HANDSHAKE_BYTES` allocation cap), and `parse_handshake_message` (the post-reassembly walker, which the QUIC parser will reuse directly). libFuzzer's defaults give us the four guarantees the C2 contract promised: panic-free (any panic aborts and writes a reproducer), no OOB reads (AddressSanitizer, default in `cargo fuzz` builds), bounded time (`-timeout=1` kills runs > 1 s), and bounded allocation (the 64 KiB reassembly cap holds against attacker-crafted u24 length claims). **Not registered as a default quality gate** — fuzzing is open-ended and contributors shouldn't be forced to install `cargo-fuzz` to pass `quality:staged`. The right rhythm is periodic manual runs (pre-release, post-refactor). Full runbook including "what to do on a crash" lives in `crates/aegiuw-core/fuzz/README.md`.
 
+- **P4 (P2) Cost breakdown — qualitative + quantitative.** Done. With P3's criterion numbers in hand we can now characterise SNI parsing cost concretely:
+
+  *CPU (release, Apple Silicon M-class, `cargo bench -- --quick`):*
+  - typical single-record CH: **~103 ns**
+  - two-record fragmented CH: **~145 ns** (the extra 42 ns is the second-record copy in `reassemble_handshake`)
+  - reassemble-only: ~23 ns
+  - parse-only: ~66 ns
+
+  *Throughput implication:* at 103 ns/parse, a single core sustains ~9.7M parses/sec — vs. the PRD §1.1 budget of "no more than 1.5 ms per connection." We're **~14,500× under budget**. SNI parsing is not on the critical path; it's free.
+
+  *Allocations per call:*
+  - **Single-record path** (the common case): zero heap allocations. `reassemble_handshake` returns `Cow::Borrowed(&record_payload)`; `parse_handshake_message` walks the borrowed bytes with a stack-allocated `Cursor`. Only the final `SniOutcome::Cleartext { host: String }` triggers a single ~16-byte allocation (sso applies for hosts ≤ 22 bytes on glibc, slightly larger on macOS).
+  - **Multi-record path**: one `Vec<u8>` allocation in `reassemble_handshake` sized to the total handshake length (bounded by `MAX_HANDSHAKE_BYTES = 64 KiB`).
+  - **HRR consistency check (`hrr_sni_consistent`)**: allocates two `Vec`s for sorted-extension comparison; only invoked when the caller has both ClientHello1 and HelloRetryRequest in hand, never on the common path.
+
+  *Memory caps:*
+  - Reassembly cap: **64 KiB** (`MAX_HANDSHAKE_BYTES`) — bounds attacker-claimed u24 lengths.
+  - Per-record cap: **16 KiB + 256 bytes** (`MAX_RECORD_FRAGMENT`) — RFC 8446 §5.1 limit.
+  - Extension-type dup-detection set: bounded by the extension count, itself bounded by the 16 KiB extensions block.
+
+  *Daemon-level cost projection (PRD §1.1 unit economics):* at ~10–30 isolated sessions/user/month × 1 SNI parse per top-level navigation × 103 ns per parse, SNI parsing contributes **<< 1 µs/user/month of CPU**. The remaining $0.26/user/month COGS is dominated by Cloudflare Containers warm-pool time and KV/R2 — not the parser.
+
+  *Conclusion:* the parser comfortably exceeds the PRD perf budget by 4 orders of magnitude. The remaining P-cluster items (SIMD, no_std) are luxury optimisations; treat any regression > 5% in the criterion baseline as a real perf bug to investigate (the budget headroom doesn't excuse silent slowdowns).
+
 - **P3 (P2) Criterion benchmark suite.** Done. Added `criterion = "0.5"` dev-dep and `crates/aegiuw-core/benches/sni.rs` with four benches: typical single-record CH, two-record fragmented CH, reassembly-only, parse-only. `harness = false` so criterion supplies `main()`. Run with `cargo bench -p aegiuw-core`. First quick run (release, Apple Silicon, criterion `--quick`): typical extract_sni ≈ 103 ns; fragmented ≈ 145 ns; reassemble alone ≈ 23 ns; parse alone ≈ 66 ns. Subsequent runs report % deltas vs. the on-disk baseline under `target/criterion/`, giving a cheap local perf-regression check before pushing. `.gitignore` already excludes `target/`; explicitly added `target/criterion/` for clarity.
 
 - **P2 (P2) `#[inline]` on Cursor methods.** Done. Added `#[inline]` to all eight `Cursor` accessors (`new`, `remaining`, `read_u8`, `read_u16`, `read_u24`, `read_slice`, `read_u8_prefixed`, `read_u16_prefixed`). Each is a single-expression bounds-checked reader; the parse loop calls them tens of times per ClientHello. Letting the compiler inline across the crate boundary removes call overhead and lets adjacent bounds checks fuse. Cheap commit, no functional change, no test churn.
