@@ -3139,6 +3139,347 @@ mod tests {
         assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
     }
 
+    // ── T3: Real-world client corpus ─────────────────────────────────────────
+    //
+    // Synthesised-but-realistic ClientHello shapes for 8 client classes.
+    // **These are not byte-for-byte captures** — capturing real wire traffic
+    // requires a TLS-aware test harness against real services, which is
+    // out of scope for unit tests. Instead, each fixture mimics the
+    // *shape* (cipher list, extension count + order, ALPN, key_share,
+    // supported_groups, sigalgs) of the named client as documented in
+    // public sources (FoxIO JA4 database, browser source trees, library
+    // documentation). The goal is **shape coverage** — a regression that
+    // breaks parsing of any major-class real client trips one of these
+    // tests.
+    //
+    // Cipher / extension codepoint references:
+    //   - IANA TLS Cipher Suites: tls-parameters-4.csv
+    //   - IANA TLS Extensions:    tls-parameters-2.csv
+    //   - IANA TLS Supported Groups: tls-parameters-8.csv
+
+    /// Common modern TLS 1.3 cipher set, used by every modern browser /
+    /// library / CLI. Listing them here once avoids restating 3 magic
+    /// numbers in each builder.
+    const TLS_13_CIPHERS: &[u16] = &[
+        0x1301, // TLS_AES_128_GCM_SHA256
+        0x1302, // TLS_AES_256_GCM_SHA384
+        0x1303, // TLS_CHACHA20_POLY1305_SHA256
+    ];
+
+    /// ECDHE + AES-GCM TLS 1.2 ciphers most clients also offer for legacy
+    /// servers.
+    const LEGACY_ECDHE_CIPHERS: &[u16] = &[
+        0xc02b, // TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+        0xc02f, // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+        0xc02c, // TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+        0xc030, // TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+    ];
+
+    /// Pack a cipher_suites_bytes blob from a list of `u16` codepoints.
+    fn cipher_suites_blob(suites: &[u16]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(suites.len() * 2);
+        for s in suites {
+            out.extend_from_slice(&s.to_be_bytes());
+        }
+        out
+    }
+
+    /// Build a generic `ClientHello` whose ciphers are a custom blob (not
+    /// the boilerplate `[0x00, 0x02, 0x13, 0x01]`). Bypasses
+    /// `build_handshake_message` so the corpus can encode realistic cipher
+    /// counts.
+    fn build_clienthello_custom_ciphers(extensions: &[u8], cipher_suites: &[u16]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x03, 0x03]); // legacy_version
+        body.extend_from_slice(&[0xAA; 32]); // random
+        body.push(0); // legacy_session_id_len
+        let ciphers = cipher_suites_blob(cipher_suites);
+        body.extend_from_slice(&(ciphers.len() as u16).to_be_bytes());
+        body.extend_from_slice(&ciphers);
+        body.extend_from_slice(&[0x01, 0x00]); // compression = null
+        body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        body.extend_from_slice(extensions);
+
+        let mut handshake = Vec::new();
+        handshake.push(HANDSHAKE_TYPE_CLIENT_HELLO);
+        let body_len = body.len() as u32;
+        handshake.push(((body_len >> 16) & 0xff) as u8);
+        handshake.push(((body_len >> 8) & 0xff) as u8);
+        handshake.push((body_len & 0xff) as u8);
+        handshake.extend_from_slice(&body);
+
+        wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake)
+    }
+
+    /// **Chrome 2026 desktop.** Modeled after the post-MLKEM-standardisation
+    /// Chrome (~m121+): X25519MLKEM768 hybrid, ECH, certificate compression,
+    /// 16+ extensions including 3 GREASE.
+    fn build_chrome_2026_clienthello() -> Vec<u8> {
+        let mut exts = Vec::new();
+        // GREASE first (Chrome's signature opening move).
+        exts.extend_from_slice(&build_extension(0x0A0A, &[]));
+        exts.extend_from_slice(&build_sni_extension("www.example.com"));
+        exts.extend_from_slice(&build_extension(0x0017, &[])); // extended_master_secret
+        exts.extend_from_slice(&build_extension(0x002a, &[])); // early_data (no, but the option marker — Chrome doesn't unless resuming; included here as a no-op opt)
+        exts.extend_from_slice(&build_supported_versions_extension(&[0x0304, 0x0303]));
+        exts.extend_from_slice(&build_signature_algorithms_extension(&[
+            0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601,
+        ]));
+        exts.extend_from_slice(&build_supported_groups_extension(&[
+            0x0A0A, 0x11ec, 0x001d, 0x0017, 0x0018,
+        ]));
+        exts.extend_from_slice(&build_key_share_extension(&[
+            (0x11ec, &[0xAA; 1216]), // X25519MLKEM768-sized
+            (0x001d, &[0xBB; 32]),   // X25519
+        ]));
+        exts.extend_from_slice(&build_alpn_extension(&[b"h2", b"http/1.1"]));
+        exts.extend_from_slice(&build_ec_point_formats_extension(&[0]));
+        exts.extend_from_slice(&build_compress_certificate_extension(&[2])); // brotli
+        exts.extend_from_slice(&build_record_size_limit_extension(16384));
+        // ECH outer extension.
+        exts.extend_from_slice(&build_extension(EXT_ENCRYPTED_CLIENT_HELLO, &[0x00]));
+        // Trailing GREASE for good measure.
+        exts.extend_from_slice(&build_extension(0xCACA, &[]));
+
+        let mut ciphers: Vec<u16> = Vec::new();
+        ciphers.push(0x0A0A); // GREASE cipher
+        ciphers.extend_from_slice(TLS_13_CIPHERS);
+        ciphers.extend_from_slice(LEGACY_ECDHE_CIPHERS);
+        build_clienthello_custom_ciphers(&exts, &ciphers)
+    }
+
+    /// **Firefox 2026 desktop.** Similar shape to Chrome but distinct
+    /// extension ordering, no ECH (Firefox ECH lagged behind Chrome's),
+    /// includes ffdhe groups Chrome doesn't.
+    fn build_firefox_2026_clienthello() -> Vec<u8> {
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("www.example.com"));
+        exts.extend_from_slice(&build_extension(0x0017, &[])); // extended_master_secret
+        exts.extend_from_slice(&build_supported_versions_extension(&[0x0304, 0x0303]));
+        exts.extend_from_slice(&build_signature_algorithms_extension(&[
+            0x0403, 0x0503, 0x0603, 0x0804, 0x0805, 0x0806, 0x0401, 0x0501,
+        ]));
+        exts.extend_from_slice(&build_supported_groups_extension(&[
+            0x11ec, 0x001d, 0x0017, 0x0018, 0x0019, 0x0100, 0x0101,
+        ]));
+        exts.extend_from_slice(&build_key_share_extension(&[
+            (0x11ec, &[0xAA; 1216]),
+            (0x001d, &[0xBB; 32]),
+        ]));
+        exts.extend_from_slice(&build_alpn_extension(&[b"h2", b"http/1.1"]));
+        exts.extend_from_slice(&build_ec_point_formats_extension(&[0]));
+        exts.extend_from_slice(&build_record_size_limit_extension(16384));
+        let mut ciphers: Vec<u16> = Vec::new();
+        ciphers.extend_from_slice(TLS_13_CIPHERS);
+        ciphers.extend_from_slice(LEGACY_ECDHE_CIPHERS);
+        build_clienthello_custom_ciphers(&exts, &ciphers)
+    }
+
+    /// **Safari (macOS 15).** Distinctive cipher ordering, no PQ (Apple
+    /// adoption lags), no ECH, h2 only.
+    fn build_safari_macos15_clienthello() -> Vec<u8> {
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("www.example.com"));
+        exts.extend_from_slice(&build_extension(0x0017, &[])); // extended_master_secret
+        exts.extend_from_slice(&build_supported_versions_extension(&[0x0304, 0x0303]));
+        exts.extend_from_slice(&build_signature_algorithms_extension(&[
+            0x0403, 0x0804, 0x0401, 0x0503, 0x0203,
+        ]));
+        exts.extend_from_slice(&build_supported_groups_extension(&[0x001d, 0x0017, 0x0018]));
+        exts.extend_from_slice(&build_key_share_extension(&[
+            (0x001d, &[0xBB; 32]),
+            (0x0017, &[0xCC; 65]),
+        ]));
+        exts.extend_from_slice(&build_alpn_extension(&[b"h2", b"http/1.1"]));
+        exts.extend_from_slice(&build_ec_point_formats_extension(&[0]));
+        let ciphers: Vec<u16> = TLS_13_CIPHERS
+            .iter()
+            .chain(LEGACY_ECDHE_CIPHERS)
+            .copied()
+            .collect();
+        build_clienthello_custom_ciphers(&exts, &ciphers)
+    }
+
+    /// **curl (libcurl + OpenSSL default).** Minimal extension set, no
+    /// ALPN by default, no ECH/PQ/cert-compression.
+    fn build_curl_openssl_clienthello() -> Vec<u8> {
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("www.example.com"));
+        exts.extend_from_slice(&build_extension(0x0017, &[])); // extended_master_secret
+        exts.extend_from_slice(&build_supported_versions_extension(&[0x0304, 0x0303]));
+        exts.extend_from_slice(&build_signature_algorithms_extension(&[
+            0x0403, 0x0804, 0x0401,
+        ]));
+        exts.extend_from_slice(&build_supported_groups_extension(&[0x001d, 0x0017]));
+        exts.extend_from_slice(&build_key_share_extension(&[(0x001d, &[0xBB; 32])]));
+        let ciphers: Vec<u16> = TLS_13_CIPHERS
+            .iter()
+            .chain(LEGACY_ECDHE_CIPHERS)
+            .copied()
+            .collect();
+        build_clienthello_custom_ciphers(&exts, &ciphers)
+    }
+
+    /// **Go `crypto/tls` default.** Medium extension set, h2 ALPN,
+    /// no ECH/PQ/cert-compression.
+    fn build_go_clienthello() -> Vec<u8> {
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("www.example.com"));
+        exts.extend_from_slice(&build_extension(0x0017, &[])); // extended_master_secret
+        exts.extend_from_slice(&build_supported_versions_extension(&[0x0304, 0x0303]));
+        exts.extend_from_slice(&build_signature_algorithms_extension(&[
+            0x0403, 0x0804, 0x0401, 0x0503,
+        ]));
+        exts.extend_from_slice(&build_supported_groups_extension(&[0x001d, 0x0017, 0x0018]));
+        exts.extend_from_slice(&build_key_share_extension(&[(0x001d, &[0xBB; 32])]));
+        exts.extend_from_slice(&build_alpn_extension(&[b"h2", b"http/1.1"]));
+        exts.extend_from_slice(&build_ec_point_formats_extension(&[0]));
+        let ciphers: Vec<u16> = TLS_13_CIPHERS
+            .iter()
+            .chain(LEGACY_ECDHE_CIPHERS)
+            .copied()
+            .collect();
+        build_clienthello_custom_ciphers(&exts, &ciphers)
+    }
+
+    /// **Python `requests` (urllib3 + system OpenSSL).** Similar to curl
+    /// shape — depends on the underlying OpenSSL build.
+    fn build_python_requests_clienthello() -> Vec<u8> {
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("www.example.com"));
+        exts.extend_from_slice(&build_extension(0x0017, &[])); // extended_master_secret
+        exts.extend_from_slice(&build_supported_versions_extension(&[0x0304, 0x0303]));
+        exts.extend_from_slice(&build_signature_algorithms_extension(&[
+            0x0403, 0x0804, 0x0401, 0x0503,
+        ]));
+        exts.extend_from_slice(&build_supported_groups_extension(&[0x001d, 0x0017]));
+        exts.extend_from_slice(&build_key_share_extension(&[(0x001d, &[0xBB; 32])]));
+        let ciphers: Vec<u16> = TLS_13_CIPHERS
+            .iter()
+            .chain(LEGACY_ECDHE_CIPHERS)
+            .copied()
+            .collect();
+        build_clienthello_custom_ciphers(&exts, &ciphers)
+    }
+
+    /// **iOS URLSession (iOS 18).** Similar shape to Safari, with h2 + h3
+    /// ALPN announcement.
+    fn build_ios_urlsession_clienthello() -> Vec<u8> {
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("www.example.com"));
+        exts.extend_from_slice(&build_extension(0x0017, &[])); // extended_master_secret
+        exts.extend_from_slice(&build_supported_versions_extension(&[0x0304, 0x0303]));
+        exts.extend_from_slice(&build_signature_algorithms_extension(&[
+            0x0403, 0x0804, 0x0401, 0x0503,
+        ]));
+        exts.extend_from_slice(&build_supported_groups_extension(&[0x001d, 0x0017, 0x0018]));
+        exts.extend_from_slice(&build_key_share_extension(&[
+            (0x001d, &[0xBB; 32]),
+            (0x0017, &[0xCC; 65]),
+        ]));
+        exts.extend_from_slice(&build_alpn_extension(&[b"h2", b"http/1.1"]));
+        exts.extend_from_slice(&build_ec_point_formats_extension(&[0]));
+        let ciphers: Vec<u16> = TLS_13_CIPHERS
+            .iter()
+            .chain(LEGACY_ECDHE_CIPHERS)
+            .copied()
+            .collect();
+        build_clienthello_custom_ciphers(&exts, &ciphers)
+    }
+
+    /// **Android OkHttp 4.x.** Modern Android HTTP client shape with h2
+    /// ALPN and modern groups but no PQ.
+    fn build_android_okhttp_clienthello() -> Vec<u8> {
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("www.example.com"));
+        exts.extend_from_slice(&build_extension(0x0017, &[])); // extended_master_secret
+        exts.extend_from_slice(&build_supported_versions_extension(&[0x0304, 0x0303]));
+        exts.extend_from_slice(&build_signature_algorithms_extension(&[
+            0x0403, 0x0804, 0x0401, 0x0503, 0x0805,
+        ]));
+        exts.extend_from_slice(&build_supported_groups_extension(&[
+            0x001d, 0x0017, 0x0018, 0x0019,
+        ]));
+        exts.extend_from_slice(&build_key_share_extension(&[(0x001d, &[0xBB; 32])]));
+        exts.extend_from_slice(&build_alpn_extension(&[b"h2", b"http/1.1"]));
+        exts.extend_from_slice(&build_ec_point_formats_extension(&[0]));
+        let ciphers: Vec<u16> = TLS_13_CIPHERS
+            .iter()
+            .chain(LEGACY_ECDHE_CIPHERS)
+            .copied()
+            .collect();
+        build_clienthello_custom_ciphers(&exts, &ciphers)
+    }
+
+    /// Walks all 8 fixtures and asserts each parses successfully. A
+    /// regression that breaks parsing of any major client shape trips this
+    /// single test.
+    #[test]
+    fn t3_real_world_corpus_all_parse() {
+        let corpus: &[(&str, Vec<u8>)] = &[
+            ("chrome_2026", build_chrome_2026_clienthello()),
+            ("firefox_2026", build_firefox_2026_clienthello()),
+            ("safari_macos15", build_safari_macos15_clienthello()),
+            ("curl_openssl", build_curl_openssl_clienthello()),
+            ("go_crypto_tls", build_go_clienthello()),
+            ("python_requests", build_python_requests_clienthello()),
+            ("ios_urlsession", build_ios_urlsession_clienthello()),
+            ("android_okhttp", build_android_okhttp_clienthello()),
+        ];
+        for (name, bytes) in corpus {
+            assert!(
+                parse_client_hello_full(bytes).is_some(),
+                "{name}: parse_client_hello_full returned None",
+            );
+        }
+    }
+
+    #[test]
+    fn t3_chrome_shape_has_pq_ech_h2_alpn() {
+        let bytes = build_chrome_2026_clienthello();
+        let meta = parse_client_hello_full(&bytes).expect("Chrome parses");
+        // DECISIONS.C14: ECH masks the outer SNI. Chrome's CH presents
+        // www.example.com on the wire but meta.host is None because ECH is
+        // present — extract_sni returns Encrypted, not Cleartext.
+        assert!(meta.ech_present);
+        assert!(meta.host.is_none(), "ECH must mask outer SNI");
+        assert!(meta.has_post_quantum_key_share());
+        assert!(meta.offers(AlpnProtocol::Http2));
+        assert_eq!(meta.highest_supported_tls_version(), TlsVersion::Tls13);
+        // SniOutcome projects to Encrypted.
+        assert_eq!(extract_sni(&bytes), SniOutcome::Encrypted);
+    }
+
+    #[test]
+    fn t3_firefox_shape_has_pq_no_ech() {
+        let bytes = build_firefox_2026_clienthello();
+        let meta = parse_client_hello_full(&bytes).expect("Firefox parses");
+        assert!(meta.has_post_quantum_key_share());
+        assert!(!meta.ech_present, "Firefox without ECH in our model");
+        assert!(meta.offers(AlpnProtocol::Http2));
+    }
+
+    #[test]
+    fn t3_safari_shape_no_pq_no_ech() {
+        let bytes = build_safari_macos15_clienthello();
+        let meta = parse_client_hello_full(&bytes).expect("Safari parses");
+        assert!(!meta.has_post_quantum_key_share());
+        assert!(!meta.ech_present);
+        assert!(meta.offers(AlpnProtocol::Http2));
+    }
+
+    #[test]
+    fn t3_curl_shape_no_alpn_minimal_extensions() {
+        let bytes = build_curl_openssl_clienthello();
+        let meta = parse_client_hello_full(&bytes).expect("curl parses");
+        assert!(
+            meta.alpn_protocols.is_none(),
+            "curl default = no ALPN preference"
+        );
+        assert!(!meta.has_post_quantum_key_share());
+        assert!(!meta.ech_present);
+    }
+
     // ── Trailing-bytes tolerance (C9, RFC 8446 §4) ───────────────────────────
 
     /// Local fixture: build a ClientHello whose handshake body has extra bytes

@@ -252,6 +252,29 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **T3 (P1) Real-world ClientHello corpus (synthetic-realistic).** Done. 8 client-shape fixtures modeled after the documented behaviour of major real-world clients:
+
+  | Fixture | Modeled after |
+  |---|---|
+  | `build_chrome_2026_clienthello` | Chrome ≥ m121 — PQ hybrid (X25519MLKEM768), ECH, certificate compression, ~16 ext, 3 GREASE |
+  | `build_firefox_2026_clienthello` | Firefox 2026 — PQ hybrid, no ECH (lagged behind Chrome), ffdhe groups |
+  | `build_safari_macos15_clienthello` | Safari macOS 15 — no PQ, no ECH, distinctive sigalg ordering |
+  | `build_curl_openssl_clienthello` | curl + OpenSSL — minimal ext set, no ALPN by default, no PQ/ECH |
+  | `build_go_clienthello` | Go `crypto/tls` — h2 ALPN via net/http, no PQ/ECH |
+  | `build_python_requests_clienthello` | Python `requests` (urllib3 + OpenSSL) |
+  | `build_ios_urlsession_clienthello` | iOS 18 URLSession — Safari-like |
+  | `build_android_okhttp_clienthello` | Android OkHttp 4.x — h2 ALPN, modern sigalgs, no PQ |
+
+  **Scope note pinned in source:** these are **not byte-for-byte captures** — capturing real wire traffic requires a TLS-aware test harness against real services, which is out of scope for unit tests. The fixtures mimic the *shape* (cipher list, extension count + order, ALPN, key_share, supported_groups, sigalgs) as documented in public sources (FoxIO JA4 database, browser source trees, library docs). The goal is **shape coverage**: a regression that breaks parsing of any major-class real client trips one of these tests.
+
+  **Tests added:**
+  - `t3_real_world_corpus_all_parse` — walks all 8 fixtures and asserts each parses successfully. Single regression guard.
+  - Per-client shape pinners (Chrome / Firefox / Safari / curl) — assert the key fingerprint dimensions (`has_post_quantum_key_share`, `ech_present`, ALPN preference) match the modeled client. E.g. Chrome must show PQ + ECH; Safari must show no PQ + no ECH; curl must show no ALPN preference.
+
+  **DECISIONS.C14 bug-catch:** initially the Chrome shape test asserted `meta.host == Some("www.example.com")`, but the parser correctly masks the host when ECH is present. Fix landed in the same commit with a comment pinning the C14 contract: ECH-bearing CHs return `host: None` (decoy) and project to `SniOutcome::Encrypted`.
+
+  234 tests pass (was 229 — added 5). Clippy clean both feature sets.
+
 - **T2 (P1) GREASE-noise test fixture.** Done. 6 new tests pinning that GREASE codepoints (RFC 8701) before, after, and around the `server_name` extension don't interfere with SNI extraction or extension-order observability. Every modern browser sprinkles ~3 GREASE extensions throughout the wire CH; a parser that mishandled them would reject most production traffic.
 
   **Contracts pinned:**
