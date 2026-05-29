@@ -11,6 +11,14 @@ rust-version.workspace = true
 [lints.rust]
 unsafe_code = "forbid"
 
+[features]
+# SNI backlog O4: when enabled, the parser emits a `tracing::debug!` event
+# with a hex dump of the first 64 bytes of any `Malformed` input. Off by
+# default — opt-in for forensic analysis runs because Malformed bytes are
+# attacker-controlled and may contain unwanted strings if logs are later
+# scraped for keywords.
+debug-malformed = []
+
 [dependencies]
 serde = { workspace = true }
 # Structured observability for the SNI parser (SNI backlog O1). `tracing` is

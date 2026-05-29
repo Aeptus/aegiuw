@@ -281,7 +281,31 @@ pub fn extract_sni(bytes: &[u8]) -> SniOutcome {
         duration_us = start.elapsed().as_micros() as u64,
         "extract_sni"
     );
+    // O4: under the `debug-malformed` feature flag, emit a hex dump of the
+    // first 64 bytes on Malformed for forensic analysis. Off by default —
+    // Malformed input is attacker-controlled and may contain unwanted
+    // strings if logs are later scraped.
+    #[cfg(feature = "debug-malformed")]
+    if matches!(outcome, SniOutcome::Malformed) {
+        tracing::debug!(
+            target: "aegiuw_core::sni",
+            hex = %malformed_hex_preview(bytes),
+            "malformed input"
+        );
+    }
     outcome
+}
+
+#[cfg(feature = "debug-malformed")]
+fn malformed_hex_preview(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(64 * 3);
+    for &b in bytes.iter().take(64) {
+        // Single-pass `write!` into a String can't fail.
+        let _ = write!(out, "{b:02x} ");
+    }
+    out.pop(); // trailing space
+    out
 }
 
 /// Returns `true` if any label in `host` is a punycode A-label (a
