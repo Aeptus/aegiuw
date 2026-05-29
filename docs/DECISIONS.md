@@ -252,6 +252,29 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **F2 (P3) JA4 TLS fingerprint.** Done. Added `pub fn ja4(meta) -> Ja4` and `pub struct Ja4 { a, b, c, raw }` to `fingerprint.rs`. FoxIO 2023 spec.
+
+  **Algorithm:**
+  - `a` (10 chars, fixed width): `{q|t}{12|13|…}{d|n}{cc}{ee}{aa}` — protocol (always `t` from aegiuw-core today), TLS version (from `supported_versions` falling back to `legacy_version`), SNI presence (`d` or `n`; never `i` because the parser rejects IP literals upstream), cipher count sans GREASE (2 digits clamped at 99), extension count sans GREASE (2 digits clamped at 99), first ALPN's first+last alphanumeric byte (`"00"` if absent).
+  - `b` (12 hex): SHA-256 of sorted ciphers (sans GREASE) joined by comma in decimal. First 12 hex chars.
+  - `c` (12 hex): SHA-256 of sorted extensions (sans GREASE, **sans SNI `0x0000` and ALPN `0x0010`** — both are already represented in the `a` segment) + optional `_` + sigalgs in **wire order** (not sorted). First 12 hex chars.
+
+  **Why JA4 over JA3 for new work** — pinned in module docs:
+  - JA3's first field is always `771` (legacy_version 0x0303) for TLS 1.3, so it lost version discrimination. JA4 reads `supported_versions`.
+  - JA4 **sorts** cipher and extension lists; JA3 deliberately doesn't. A browser that re-randomises extension order between releases keeps the same JA4 but gets a fresh JA3 every time. Pinned by `ja4_b_sorts_ciphers_independent_of_wire_order`.
+
+  **Edge cases pinned:**
+  - Empty cipher list → JA4_b sentinel `"000000000000"` (parser never produces this, but the helper must not panic).
+  - No extensions after SNI/ALPN/GREASE filter → JA4_c sentinel.
+  - No sigalgs extension → JA4_c is just the sorted-extension hash, no `_` separator.
+  - ALPN char extraction skips non-alphanumeric chars: `http/1.1` → `h1`, `h3-29` → `h9`, `h2` → `h2`.
+
+  **New dep:** `sha2 = "0.10"` (RustCrypto, `default-features = false` for no_std-compat).
+
+  **Reference SHA-256 values in tests:** each computed externally via `printf '%s' '<input>' | sha256sum | head -c 12` with the command in the comment so future PRs can reproduce.
+
+  **201 tests pass** (was 187 — added 14 JA4 unit tests). Clippy clean both feature sets.
+
 - **F1 (P3) JA3 TLS fingerprint.** Done. New `crates/aegiuw-core/src/fingerprint.rs` module with:
   - `pub fn ja3(meta: &ClientHelloMetadata) -> Ja3` — Althouse/Atkinson/Atkins 2017 algorithm.
   - `pub struct Ja3 { raw, md5 }` — comma-separated input string + lowercase hex MD5.

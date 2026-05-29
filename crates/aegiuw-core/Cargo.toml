@@ -48,6 +48,10 @@ memchr = { version = "2", default-features = false }
 # RustCrypto's no_std-friendly md-5; `default-features = false` keeps the
 # crate compatible with our P6 no_std build.
 md-5 = { version = "0.10", default-features = false }
+# SNI backlog F2: JA4 (FoxIO 2023) uses SHA-256 of cipher / extension /
+# signature lists. Same RustCrypto family as md-5; `default-features = false`
+# keeps no_std-compat.
+sha2 = { version = "0.10", default-features = false }
 
 [dev-dependencies]
 # Property testing for the SNI parser (SNI backlog S2). Complements the

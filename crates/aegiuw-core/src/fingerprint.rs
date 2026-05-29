@@ -13,11 +13,14 @@
 //! GREASE filtering is centralised in [`is_grease_codepoint`] so JA3 / JA4 /
 //! KnownClient lookup all share the same definition.
 
-use alloc::string::String;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use md5::{Digest, Md5};
+use md5::Md5;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::sni::ClientHelloMetadata;
 
@@ -161,6 +164,216 @@ fn md5_hex_lower(input: &[u8]) -> String {
     let digest = Md5::digest(input);
     let mut out = String::with_capacity(32);
     for byte in digest {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+// ── F2: JA4 fingerprint (FoxIO 2023) ─────────────────────────────────────────
+
+/// JA4 fingerprint (SNI backlog F2).
+///
+/// Three underscore-separated parts: `a_b_c`. Format from the FoxIO 2023
+/// specification:
+///
+/// | Part | Width | Contents |
+/// |---|---|---|
+/// | `a` | 10 chars | `{q\|t}{12\|13}{d\|n}{cc}{ee}{aa}` — protocol, TLS version, SNI presence, cipher count, extension count, first ALPN's first+last alphanumeric chars |
+/// | `b` | 12 hex chars | SHA-256 of sorted ciphers (sans GREASE) joined by comma; first 12 hex chars |
+/// | `c` | 12 hex chars | SHA-256 of sorted extensions (sans GREASE, sans SNI, sans ALPN) + optional `_` + sigalgs in wire order; first 12 hex chars |
+///
+/// Why JA4 supersedes JA3 for new work: JA3's first field is always `771`
+/// (`legacy_version` = `0x0303`) for every TLS 1.3 connection, so it lost
+/// version discrimination. JA4 reads `supported_versions` and reports the
+/// actual offered version. JA4 also sorts cipher/extension lists so a
+/// browser that re-randomises extension order between releases keeps the
+/// same fingerprint.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Ja4 {
+    /// The `a` segment — protocol + TLS version + SNI + counts + ALPN.
+    pub a: String,
+    /// The `b` segment — 12 hex chars of the sorted cipher hash.
+    pub b: String,
+    /// The `c` segment — 12 hex chars of the sorted-extension + sigalg hash.
+    pub c: String,
+    /// `{a}_{b}_{c}` joined with underscores. The form seen in JA4
+    /// threat-intel feeds and dashboards.
+    pub raw: String,
+}
+
+/// Compute the JA4 fingerprint of a parsed ClientHello.
+///
+/// Always succeeds for a successfully-parsed `ClientHelloMetadata`. Empty
+/// cipher or extension lists hash to the sentinel `"000000000000"` per the
+/// FoxIO spec.
+///
+/// Protocol prefix is always `t` (TCP) — `aegiuw-core` doesn't see QUIC
+/// CRYPTO frames directly today; a future QUIC integration that calls
+/// [`parse_handshake_message_full`](crate::sni::parse_handshake_message_full)
+/// directly would need a separate entry point with `q`.
+pub fn ja4(meta: &ClientHelloMetadata<'_>) -> Ja4 {
+    let a = ja4_a(meta);
+    let b = ja4_b(meta);
+    let c = ja4_c(meta);
+    let raw = format!("{a}_{b}_{c}");
+    Ja4 { a, b, c, raw }
+}
+
+/// `a` segment: protocol + TLS version + SNI presence + cipher count +
+/// extension count + first-ALPN chars. Fixed 10-char width.
+fn ja4_a(meta: &ClientHelloMetadata<'_>) -> String {
+    let mut out = String::with_capacity(10);
+    // Protocol: we only see TCP at this layer.
+    out.push('t');
+    // TLS version: highest non-GREASE from supported_versions, falling back
+    // to the legacy 0x0303 (TLS 1.2) when the extension is absent.
+    out.push_str(ja4_tls_version_str(meta));
+    // SNI indicator: 'd' if a host parsed (IPs are rejected upstream as
+    // Malformed so 'i' is unreachable here), 'n' if absent.
+    out.push(if meta.host.is_some() { 'd' } else { 'n' });
+    // Cipher count sans GREASE, 2 digits, clamped to 99.
+    let cc = meta
+        .cipher_suites
+        .iter()
+        .filter(|&&v| !is_grease_codepoint(v))
+        .count()
+        .min(99);
+    let _ = write!(out, "{cc:02}");
+    // Extension count sans GREASE, 2 digits, clamped to 99.
+    let ee = meta
+        .extension_order
+        .iter()
+        .filter(|&&v| !is_grease_codepoint(v))
+        .count()
+        .min(99);
+    let _ = write!(out, "{ee:02}");
+    // First ALPN's first + last alphanumeric chars, "00" if absent / empty.
+    out.push_str(&ja4_alpn_chars(meta));
+    out
+}
+
+/// Map the highest non-GREASE offered TLS version to its JA4 2-char code.
+fn ja4_tls_version_str(meta: &ClientHelloMetadata<'_>) -> &'static str {
+    let highest = meta
+        .supported_versions
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .copied()
+        .filter(|&v| !is_grease_codepoint(v))
+        .max()
+        // No extension (or all GREASE) → fall back to legacy_version, which
+        // our parser enforces to 0x0303 = TLS 1.2.
+        .unwrap_or(crate::sni::TLS_LEGACY_VERSION);
+    match highest {
+        0x0304 => "13",
+        0x0303 => "12",
+        0x0302 => "11",
+        0x0301 => "10",
+        0x0300 => "s3",
+        _ => "00",
+    }
+}
+
+/// First + last alphanumeric byte of the first ALPN value, ASCII. `"00"` if
+/// the ALPN extension is absent, the first value is empty, or has no
+/// alphanumeric characters.
+fn ja4_alpn_chars(meta: &ClientHelloMetadata<'_>) -> String {
+    let Some(protos) = meta.alpn_protocols.as_deref() else {
+        return "00".to_string();
+    };
+    let Some(first) = protos.first() else {
+        return "00".to_string();
+    };
+    let bytes: &[u8] = first.as_ref();
+    let first_char = bytes
+        .iter()
+        .copied()
+        .find(u8::is_ascii_alphanumeric)
+        .map(char::from);
+    let last_char = bytes
+        .iter()
+        .copied()
+        .rfind(u8::is_ascii_alphanumeric)
+        .map(char::from);
+    match (first_char, last_char) {
+        (Some(f), Some(l)) => {
+            let mut s = String::with_capacity(2);
+            s.push(f);
+            s.push(l);
+            s
+        }
+        _ => "00".to_string(),
+    }
+}
+
+/// `b` segment: SHA-256 of the sorted cipher list (sans GREASE) joined by
+/// comma in decimal. Returns the first 12 hex chars, or the sentinel
+/// `"000000000000"` if no ciphers survive the filter.
+fn ja4_b(meta: &ClientHelloMetadata<'_>) -> String {
+    let mut ciphers: Vec<u16> = meta
+        .cipher_suites
+        .iter()
+        .copied()
+        .filter(|&v| !is_grease_codepoint(v))
+        .collect();
+    ciphers.sort_unstable();
+    let input = join_u16_decimal(&ciphers, ',');
+    sha256_first_12_hex(input.as_bytes())
+}
+
+/// `c` segment: SHA-256 of the sorted extension list (sans GREASE, sans
+/// SNI `0x0000`, sans ALPN `0x0010`) joined by comma; if
+/// `signature_algorithms` is present, append `_` then the sigalg list
+/// (sans GREASE) in **wire order**. SNI and ALPN are dropped from the
+/// extension input because they're already represented in the `a` segment.
+fn ja4_c(meta: &ClientHelloMetadata<'_>) -> String {
+    let mut exts: Vec<u16> = meta
+        .extension_order
+        .iter()
+        .copied()
+        .filter(|&v| !is_grease_codepoint(v))
+        .filter(|&v| v != crate::sni::EXT_SERVER_NAME && v != crate::sni::EXT_ALPN)
+        .collect();
+    exts.sort_unstable();
+    let mut input = join_u16_decimal(&exts, ',');
+    if let Some(sigs) = meta.signature_algorithms.as_deref() {
+        let filtered: Vec<u16> = sigs
+            .iter()
+            .copied()
+            .filter(|&v| !is_grease_codepoint(v))
+            .collect();
+        if !filtered.is_empty() {
+            input.push('_');
+            input.push_str(&join_u16_decimal(&filtered, ','));
+        }
+    }
+    sha256_first_12_hex(input.as_bytes())
+}
+
+fn join_u16_decimal(values: &[u16], sep: char) -> String {
+    let mut out = String::with_capacity(values.len() * 4);
+    let mut first = true;
+    for &v in values {
+        if !first {
+            out.push(sep);
+        }
+        let _ = write!(out, "{v}");
+        first = false;
+    }
+    out
+}
+
+/// First 12 hex chars of SHA-256(input), lowercase. Returns the FoxIO
+/// sentinel `"000000000000"` for empty input (an empty cipher / extension
+/// list with no sigalgs).
+fn sha256_first_12_hex(input: &[u8]) -> String {
+    if input.is_empty() {
+        return "000000000000".to_string();
+    }
+    let digest = Sha256::digest(input);
+    let mut out = String::with_capacity(12);
+    for byte in digest.iter().take(6) {
         let _ = write!(out, "{byte:02x}");
     }
     out
@@ -340,5 +553,177 @@ mod tests {
         let with_host = ja3(&meta);
 
         assert_eq!(baseline, with_host);
+    }
+
+    // ── F2: JA4 ──────────────────────────────────────────────────────────────
+
+    /// Build a Chrome-like ClientHelloMetadata used by several JA4 tests.
+    fn chrome_like_meta<'a>() -> ClientHelloMetadata<'a> {
+        let mut meta = empty_meta();
+        meta.host = Some(Cow::Borrowed("example.com"));
+        meta.cipher_suites = vec![0x1301, 0x1302, 0x1303];
+        meta.extension_order = vec![
+            0x0000, // server_name (excluded from JA4_c)
+            0x000a, // supported_groups
+            0x000b, // ec_point_formats
+            0x000d, // signature_algorithms
+            0x0010, // ALPN (excluded from JA4_c)
+            0x002b, // supported_versions
+            0x0033, // key_share
+        ];
+        meta.alpn_protocols = Some(vec![Cow::Borrowed(b"h2".as_slice())]);
+        meta.supported_versions = Some(vec![0x0304, 0x0303]);
+        meta.supported_groups = Some(vec![0x001d, 0x0017, 0x0018]);
+        meta.ec_point_formats = Some(vec![0]);
+        meta.signature_algorithms = Some(vec![0x0403, 0x0804, 0x0401]);
+        meta
+    }
+
+    #[test]
+    fn ja4_a_segment_for_chrome_like_clienthello() {
+        let meta = chrome_like_meta();
+        let ja4 = ja4(&meta);
+        // t (TCP) + 13 (TLS 1.3) + d (SNI domain) + 03 (3 ciphers, sans GREASE)
+        // + 07 (7 extensions, sans GREASE) + h2 (first ALPN's first+last alnum).
+        assert_eq!(ja4.a, "t13d0307h2");
+    }
+
+    #[test]
+    fn ja4_b_hashes_sorted_cipher_list() {
+        let meta = chrome_like_meta();
+        let ja4 = ja4(&meta);
+        // SHA-256('4865,4866,4867') first 12 hex:
+        //   printf '%s' '4865,4866,4867' | sha256sum | head -c 12
+        //   12e7d38c872c
+        assert_eq!(ja4.b, "12e7d38c872c");
+    }
+
+    #[test]
+    fn ja4_c_includes_sigalgs_when_present() {
+        let meta = chrome_like_meta();
+        let ja4 = ja4(&meta);
+        // Sorted exts sans SNI(0) and ALPN(16): 10,11,13,43,51
+        // Then "_" + sigalgs in WIRE order (NOT sorted): 1027,2052,1025
+        //   printf '%s' '10,11,13,43,51_1027,2052,1025' | sha256sum | head -c 12
+        //   bc990851d7f5
+        assert_eq!(ja4.c, "bc990851d7f5");
+    }
+
+    #[test]
+    fn ja4_raw_is_underscore_joined_three_parts() {
+        let meta = chrome_like_meta();
+        let ja4 = ja4(&meta);
+        assert_eq!(ja4.raw, format!("{}_{}_{}", ja4.a, ja4.b, ja4.c));
+    }
+
+    #[test]
+    fn ja4_c_drops_sigalgs_section_when_absent() {
+        let mut meta = chrome_like_meta();
+        meta.signature_algorithms = None;
+        let ja4 = ja4(&meta);
+        // Same exts but no "_sigs" trailer:
+        //   printf '%s' '10,11,13,43,51' | sha256sum | head -c 12
+        //   b87188ea39eb
+        assert_eq!(ja4.c, "b87188ea39eb");
+    }
+
+    #[test]
+    fn ja4_a_uses_n_when_sni_absent() {
+        let mut meta = chrome_like_meta();
+        meta.host = None;
+        let ja4 = ja4(&meta);
+        // Third char is 'n' instead of 'd'.
+        assert_eq!(&ja4.a[..3], "t13");
+        assert_eq!(&ja4.a[3..4], "n");
+    }
+
+    #[test]
+    fn ja4_a_uses_00_when_alpn_absent() {
+        let mut meta = chrome_like_meta();
+        meta.alpn_protocols = None;
+        let ja4 = ja4(&meta);
+        // Last two chars of `a` are 00 when no ALPN.
+        assert_eq!(&ja4.a[8..10], "00");
+    }
+
+    #[test]
+    fn ja4_alpn_chars_picks_first_and_last_alphanumeric() {
+        // http/1.1 → first alphanumeric 'h', last alphanumeric '1'.
+        let mut meta = empty_meta();
+        meta.cipher_suites = vec![0x1301];
+        meta.alpn_protocols = Some(vec![Cow::Borrowed(b"http/1.1".as_slice())]);
+        meta.supported_versions = Some(vec![0x0304]);
+        let ja4 = ja4(&meta);
+        assert_eq!(&ja4.a[8..10], "h1");
+    }
+
+    #[test]
+    fn ja4_alpn_chars_h3_draft_codepoint_collapses_to_h9() {
+        // h3-29 → first 'h', last '9'.
+        let mut meta = empty_meta();
+        meta.cipher_suites = vec![0x1301];
+        meta.alpn_protocols = Some(vec![Cow::Borrowed(b"h3-29".as_slice())]);
+        meta.supported_versions = Some(vec![0x0304]);
+        let ja4 = ja4(&meta);
+        assert_eq!(&ja4.a[8..10], "h9");
+    }
+
+    #[test]
+    fn ja4_filters_grease_from_cipher_and_ext_counts() {
+        let mut meta = empty_meta();
+        // Three real ciphers + two GREASE — count must be 03.
+        meta.cipher_suites = vec![0x0A0A, 0x1301, 0x1302, 0x1303, 0x1A1A];
+        // Three real extensions + one GREASE — count must be 03.
+        meta.extension_order = vec![0xCACA, 0x0000, 0x002b, 0x0033];
+        meta.supported_versions = Some(vec![0x0304]);
+        meta.host = Some(Cow::Borrowed("example.com"));
+        let ja4 = ja4(&meta);
+        // a = t + 13 + d + 03 + 03 + 00
+        assert_eq!(ja4.a, "t13d030300");
+    }
+
+    #[test]
+    fn ja4_tls_version_falls_back_to_legacy_when_no_supported_versions() {
+        let mut meta = empty_meta();
+        meta.cipher_suites = vec![0x1301];
+        meta.host = Some(Cow::Borrowed("example.com"));
+        // Without supported_versions, we report TLS 1.2 (legacy_version
+        // enforced to 0x0303 by our parser).
+        let ja4 = ja4(&meta);
+        assert_eq!(&ja4.a[..3], "t12");
+    }
+
+    #[test]
+    fn ja4_b_empty_cipher_list_returns_sentinel() {
+        let mut meta = empty_meta();
+        meta.cipher_suites = vec![]; // pathological — parser rejects but the helper must not panic
+        meta.host = Some(Cow::Borrowed("example.com"));
+        let ja4 = ja4(&meta);
+        assert_eq!(ja4.b, "000000000000");
+    }
+
+    #[test]
+    fn ja4_c_empty_returns_sentinel_when_no_exts_no_sigs() {
+        let mut meta = empty_meta();
+        meta.cipher_suites = vec![0x1301];
+        meta.host = Some(Cow::Borrowed("example.com"));
+        // No extensions at all → c is the sentinel.
+        let ja4 = ja4(&meta);
+        assert_eq!(ja4.c, "000000000000");
+    }
+
+    #[test]
+    fn ja4_b_sorts_ciphers_independent_of_wire_order() {
+        // JA4 sorts cipher list (JA3 doesn't — pinned by ja3_preserves_wire_order_within_each_field).
+        let mut meta_a = empty_meta();
+        meta_a.cipher_suites = vec![0x1301, 0x1302, 0x1303];
+        meta_a.host = Some(Cow::Borrowed("example.com"));
+
+        let mut meta_b = empty_meta();
+        meta_b.cipher_suites = vec![0x1303, 0x1301, 0x1302]; // permuted
+        meta_b.host = Some(Cow::Borrowed("example.com"));
+
+        // Equal JA4_b means the sort happened.
+        assert_eq!(ja4(&meta_a).b, ja4(&meta_b).b);
     }
 }
