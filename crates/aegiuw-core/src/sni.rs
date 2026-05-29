@@ -1083,6 +1083,43 @@ mod tests {
         assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
     }
 
+    // ── Maximum-size single record within budget (S4) ────────────────────────
+
+    #[test]
+    fn parses_maximum_single_record_within_debug_budget() {
+        // A single TLS record near the RFC 8446 §5.1 16 KiB ceiling, packed
+        // with extensions. Asserts the parse completes within a generous
+        // debug-mode budget — PRD §1.1 calls for ≤ 1.5 ms in release; 50 ms
+        // here covers debug + sanitizers + slow CI hardware while still
+        // catching any catastrophic regression.
+        use std::time::Instant;
+
+        const N: usize = 4_000; // 4000 × 4 bytes ≈ 16 KiB of extensions
+        let mut extensions = Vec::with_capacity(N * 4);
+        for i in 0..N {
+            let ext_type = (0x0100u16).wrapping_add(i as u16);
+            extensions.extend_from_slice(&build_extension(ext_type, &[]));
+        }
+        let bytes = build_client_hello(&extensions);
+
+        // Sanity: confirm this still fits in a *single* record.
+        assert!(
+            bytes.len() <= 5 + 16_640,
+            "fixture grew past one record (len={})",
+            bytes.len(),
+        );
+
+        let start = Instant::now();
+        let outcome = extract_sni(&bytes);
+        let elapsed = start.elapsed();
+
+        assert_eq!(outcome, SniOutcome::NotFound);
+        assert!(
+            elapsed.as_millis() < 50,
+            "parser took {elapsed:?} for {N}-extension max-size record",
+        );
+    }
+
     // ── Linear scaling under extension explosion (S3) ────────────────────────
 
     #[test]
