@@ -330,6 +330,40 @@ fn malformed_hex_preview(bytes: &[u8]) -> String {
 /// assert!(!is_idn_host("xn-test.com"));                // needs *two* hyphens
 /// assert!(!is_idn_host(""));
 /// ```
+/// The outer SNI Cloudflare uses for all ECH-enabled zones (per the
+/// Cloudflare blog post *"Encrypted Client Hello — the last puzzle piece
+/// to privacy"*). Every Cloudflare-hosted ECH connection presents this
+/// host name in the *visible* ClientHello; the real destination is inside
+/// the encrypted inner ClientHello and never observable to us. SNI
+/// backlog O5.
+pub const CLOUDFLARE_ECH_OUTER_SNI: &str = "cloudflare-ech.com";
+
+/// Whether `host` is the exact Cloudflare ECH outer-SNI sentinel (case-
+/// insensitive). When this returns `true` while ECH is *not* present in
+/// the same ClientHello, the bytes are almost certainly a misconfigured
+/// or probing client — Cloudflare itself only emits this name as the
+/// outer SNI in actual ECH handshakes.
+///
+/// Today's `SniOutcome::Encrypted` doesn't carry the outer SNI (we
+/// prioritise ECH detection over the visible host bytes), so this helper
+/// is most useful when the daemon has a separate path that observes the
+/// raw SNI bytes from the TUN layer before they're parsed. The constant
+/// and predicate live here so the value lives in one place.
+///
+/// # Examples
+///
+/// ```
+/// use aegiuw_core::{is_cloudflare_ech_outer, CLOUDFLARE_ECH_OUTER_SNI};
+///
+/// assert!(is_cloudflare_ech_outer(CLOUDFLARE_ECH_OUTER_SNI));
+/// assert!(is_cloudflare_ech_outer("Cloudflare-ECH.com"));        // case-insensitive
+/// assert!(!is_cloudflare_ech_outer("example.com"));
+/// assert!(!is_cloudflare_ech_outer("cloudflare-ech.example.com")); // suffix, not the name
+/// ```
+pub fn is_cloudflare_ech_outer(host: &str) -> bool {
+    host.eq_ignore_ascii_case(CLOUDFLARE_ECH_OUTER_SNI)
+}
+
 pub fn is_idn_host(host: &str) -> bool {
     host.split('.').any(|label| {
         label
@@ -1313,6 +1347,27 @@ mod tests {
         ) {
             let _ = parse_handshake_message(&bytes);
         }
+    }
+
+    // ── Cloudflare ECH outer-SNI sentinel (O5) ───────────────────────────────
+
+    #[test]
+    fn cloudflare_ech_outer_detector_matches_exact_string() {
+        assert!(is_cloudflare_ech_outer(CLOUDFLARE_ECH_OUTER_SNI));
+    }
+
+    #[test]
+    fn cloudflare_ech_outer_detector_is_case_insensitive() {
+        assert!(is_cloudflare_ech_outer("CLOUDFLARE-ECH.COM"));
+        assert!(is_cloudflare_ech_outer("Cloudflare-Ech.Com"));
+    }
+
+    #[test]
+    fn cloudflare_ech_outer_detector_rejects_non_matches() {
+        assert!(!is_cloudflare_ech_outer("example.com"));
+        assert!(!is_cloudflare_ech_outer("cloudflare-ech.example.com"));
+        assert!(!is_cloudflare_ech_outer("notcloudflare-ech.com"));
+        assert!(!is_cloudflare_ech_outer(""));
     }
 
     // ── IDN / punycode detection (H7, RFC 5890 §2.3.2.1) ─────────────────────
