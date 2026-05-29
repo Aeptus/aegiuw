@@ -252,6 +252,15 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **F3 (P3) JA4_H stub (HTTP-layer fingerprint).** Done as a stub per the backlog wording ("out of SNI parser scope but worth a stub"). Added `pub fn ja4_h(input: &Ja4HInput) -> Ja4H` to `fingerprint.rs` with:
+  - `pub struct Ja4HInput<'a>` — borrowed view over the HTTP-layer signals the daemon will collect (method, version, cookie/referer flags, header_names in wire order, accept_language). Not Serialize/Deserialize — it's an input view, not a persisted shape.
+  - `pub struct Ja4H { a, b, c, d, raw, implemented }` — segments + the underscore-joined form + an `implemented: bool` flag that's `false` for the stub and `true` once the real algorithm lands.
+  - Current implementation returns sentinel strings (`"00000000"` + three `"000000000000"`) with `implemented = false`. Shape and widths match the spec so downstream parsers don't have to special-case the stub form — pinned by `ja4_h_stub_segments_have_correct_widths`.
+
+  **Why a stub in `aegiuw-core`:** JA4_H's signals (HTTP/2 SETTINGS, header order, cookies, Accept-Language) live in the HTTP layer, which `aegiuw-core` doesn't see. But the JA4 suite (`ja4`, `ja4_h`, `ja4_s`, `ja4_x`, `ja4_t`) shares hash-and-format conventions — centralising the entry points and types in `fingerprint.rs` keeps the serde shapes and label conventions consistent across the suite. Downstream consumers can wire the call site now and only need a recompile (not a refactor) when the implementation arrives.
+
+  **Tests:** 3 new — `implemented` flag set to `false`, segment width contract, raw is underscore-joined. 204 total (was 201). Clippy clean both feature sets.
+
 - **F2 (P3) JA4 TLS fingerprint.** Done. Added `pub fn ja4(meta) -> Ja4` and `pub struct Ja4 { a, b, c, raw }` to `fingerprint.rs`. FoxIO 2023 spec.
 
   **Algorithm:**

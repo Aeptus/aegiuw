@@ -379,6 +379,110 @@ fn sha256_first_12_hex(input: &[u8]) -> String {
     out
 }
 
+// ── F3: JA4_H stub (HTTP-layer fingerprint) ──────────────────────────────────
+
+/// Input the daemon's HTTP layer collects from each HTTP request and
+/// forwards into [`ja4_h`].
+///
+/// JA4_H is the HTTP-layer fingerprint half of the JA4 suite (FoxIO 2023):
+/// it characterises a client by HTTP method, version, header order, cookie
+/// presence, and Accept-Language. None of those signals are visible to
+/// `aegiuw-core` itself — we only see the TLS handshake. So we ship the
+/// type and the entry point in the core (for shared serde shape and a
+/// stable public API) and stub the implementation until the daemon's
+/// HTTP layer is wired up.
+///
+/// **Stub scope:** the daemon collects these fields and passes them in;
+/// [`ja4_h`] then assembles them into the JA4_H string. The current
+/// implementation returns a sentinel — see [`ja4_h`] for the contract.
+///
+/// SNI backlog F3.
+///
+/// Not `Serialize`/`Deserialize` — this is a borrowed view over caller-held
+/// header data, constructed at the call site and consumed immediately. If
+/// you need to persist the input, build a separate owned type and convert
+/// at the boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Ja4HInput<'a> {
+    /// HTTP method as ASCII uppercase (`"GET"`, `"POST"`, …). The JA4_H
+    /// `a` segment uses the first two characters.
+    pub method: &'a str,
+    /// HTTP major version: `"11"` for HTTP/1.1, `"20"` for HTTP/2,
+    /// `"30"` for HTTP/3. JA4_H pads to 2 chars.
+    pub version: &'a str,
+    /// Whether a `Cookie` header was sent (`c` if yes, `n` if no).
+    pub has_cookie: bool,
+    /// Whether a `Referer` header was sent (`r` if yes, `n` if no).
+    pub has_referer: bool,
+    /// Header names as the client sent them, in wire order. JA4_H hashes
+    /// a filtered, lowercased version for its `b` segment.
+    pub header_names: &'a [&'a str],
+    /// Value of the `Accept-Language` header if present, else `""`.
+    /// JA4_H takes the first 4 alphabetic chars (e.g. `"en-U"` from
+    /// `"en-US,en;q=0.9"`).
+    pub accept_language: &'a str,
+}
+
+/// Compute the JA4_H HTTP-layer fingerprint (SNI backlog F3).
+///
+/// **Stub:** returns a placeholder string that includes the input shape
+/// so the call site is wired up but downstream code can detect "not yet
+/// implemented" without crashing. The shape matches the JA4_H format
+/// (`{a}_{b}_{c}_{d}`) but each segment is a sentinel.
+///
+/// The real implementation lands once the daemon's HTTP layer collects
+/// the [`Ja4HInput`] fields per request. Until then, this entry point
+/// keeps the public API stable: downstream consumers can call `ja4_h`
+/// today and only need to recompile (not refactor) when the
+/// implementation arrives.
+///
+/// # Why a stub in core
+///
+/// The JA4 suite (`ja4`, `ja4_h`, `ja4_s`, `ja4_x`, `ja4_t`) shares a
+/// hash-and-format convention. Centralising the entry points in
+/// `aegiuw_core::fingerprint` keeps the serde shapes and label
+/// conventions consistent across the suite.
+pub fn ja4_h(_input: &Ja4HInput<'_>) -> Ja4H {
+    Ja4H {
+        a: "00000000".to_string(),
+        b: "000000000000".to_string(),
+        c: "000000000000".to_string(),
+        d: "000000000000".to_string(),
+        raw: "00000000_000000000000_000000000000_000000000000".to_string(),
+        implemented: false,
+    }
+}
+
+/// JA4_H HTTP-layer fingerprint (SNI backlog F3 — stub today).
+///
+/// Format: `{a}_{b}_{c}_{d}`.
+///
+/// - `a` (8 chars): method (2) + version (2) + cookie/referer flags (2)
+///   + Accept-Language first 4 alphanumeric (padded with `0`).
+/// - `b` (12 hex): SHA-256 of filtered, lowercased, comma-joined header
+///   list; first 12 hex chars.
+/// - `c` (12 hex): SHA-256 of cookie field name list, first 12 hex chars.
+///   `"000000000000"` if no cookies.
+/// - `d` (12 hex): SHA-256 of cookie field-value pair list, first 12 hex
+///   chars. `"000000000000"` if no cookies.
+///
+/// [`implemented`](Ja4H::implemented) is `false` while the stub is in
+/// place; callers should treat the segment strings as opaque sentinels.
+///
+/// [`implemented`]: Ja4H::implemented
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Ja4H {
+    pub a: String,
+    pub b: String,
+    pub c: String,
+    pub d: String,
+    pub raw: String,
+    /// `false` while [`ja4_h`] is a stub; `true` once the real algorithm
+    /// lands. Downstream filters / dashboards can gate JA4_H-based
+    /// decisions on this flag.
+    pub implemented: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::borrow::Cow;
@@ -725,5 +829,60 @@ mod tests {
 
         // Equal JA4_b means the sort happened.
         assert_eq!(ja4(&meta_a).b, ja4(&meta_b).b);
+    }
+
+    // ── F3: JA4_H stub ───────────────────────────────────────────────────────
+
+    #[test]
+    fn ja4_h_stub_returns_implemented_false() {
+        let input = Ja4HInput {
+            method: "GET",
+            version: "20",
+            has_cookie: true,
+            has_referer: false,
+            header_names: &["host", "user-agent", "accept"],
+            accept_language: "en-US,en;q=0.9",
+        };
+        let result = ja4_h(&input);
+        assert!(
+            !result.implemented,
+            "stub must signal not-yet-implemented so callers can gate decisions",
+        );
+    }
+
+    #[test]
+    fn ja4_h_stub_segments_have_correct_widths() {
+        // Even as a stub, the shape of each segment must match the spec —
+        // downstream parsers shouldn't have to special-case the stub form.
+        let input = Ja4HInput {
+            method: "POST",
+            version: "11",
+            has_cookie: false,
+            has_referer: false,
+            header_names: &[],
+            accept_language: "",
+        };
+        let result = ja4_h(&input);
+        assert_eq!(result.a.len(), 8, "a segment must be 8 chars wide");
+        assert_eq!(result.b.len(), 12, "b segment must be 12 hex chars");
+        assert_eq!(result.c.len(), 12, "c segment must be 12 hex chars");
+        assert_eq!(result.d.len(), 12, "d segment must be 12 hex chars");
+    }
+
+    #[test]
+    fn ja4_h_stub_raw_is_underscore_joined_four_parts() {
+        let input = Ja4HInput {
+            method: "GET",
+            version: "20",
+            has_cookie: false,
+            has_referer: false,
+            header_names: &[],
+            accept_language: "",
+        };
+        let result = ja4_h(&input);
+        assert_eq!(
+            result.raw,
+            format!("{}_{}_{}_{}", result.a, result.b, result.c, result.d)
+        );
     }
 }

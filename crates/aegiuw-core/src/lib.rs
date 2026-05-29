@@ -29,7 +29,7 @@ pub mod heuristics;
 pub mod risk;
 pub mod sni;
 
-pub use fingerprint::{ja3, ja4, Ja3, Ja4};
+pub use fingerprint::{ja3, ja4, ja4_h, Ja3, Ja4, Ja4H, Ja4HInput};
 pub use risk::{RiskLevel, RiskSignal, Verdict};
 pub use sni::{
     extract_sni, hrr_sni_consistent, is_cloudflare_ech_outer, is_idn_host, parse_client_hello_full,
