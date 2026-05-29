@@ -252,6 +252,12 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **A11 (P3) Expose `ec_point_formats` (RFC 8422 §5.1.2).** Done. Added `pub const EXT_EC_POINT_FORMATS: u16 = 0x000b` and `pub ec_point_formats: Option<Vec<u8>>` on `ClientHelloMetadata`. TLS 1.2 legacy: list of ECPointFormat codepoints (`0`=uncompressed, `1`=ansiX962_compressed_prime, `2`=ansiX962_compressed_char2). Rarely meaningful in TLS 1.3 ClientHellos but still emitted by some clients as a fingerprint dimension.
+
+  **Wire shape:** `u8`-prefixed list of `u8`, must be non-empty per RFC 8422 §5.1.2.
+
+  3 new tests; 175 total (was 172). Clippy clean both feature sets.
+
 - **A10 (P3) Expose `supported_groups` (RFC 8446 §4.2.7).** Done. Added `pub const EXT_SUPPORTED_GROUPS: u16 = 0x000a` and `pub supported_groups: Option<Vec<u16>>` on `ClientHelloMetadata`. Reuses A9's `parse_u16_prefixed_u16_list` (same wire shape).
 
   **Semantic distinction from `key_share_groups` pinned by `supported_groups_distinct_from_key_share_groups`:** `supported_groups` is the *could-use* list; `key_share` is the (usually shorter) subset for which the client actually shipped public keys for the first-round handshake. A client that lists X25519MLKEM768 in `supported_groups` but not in `key_share` is signalling "I can do PQ if the server asks for it via HRR" without paying the extra bytes upfront.

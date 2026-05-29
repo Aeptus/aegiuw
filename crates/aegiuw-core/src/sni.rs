@@ -198,6 +198,13 @@ pub const EXT_SIGNATURE_ALGORITHMS: u16 = 0x000d;
 /// which the client actually shipped public keys). SNI backlog A10.
 pub const EXT_SUPPORTED_GROUPS: u16 = 0x000a;
 
+/// Extension type for `ec_point_formats` (RFC 8422 §5.1.2). TLS 1.2 legacy:
+/// a `u8`-prefixed list of `u8` ECPointFormat codepoints (`0`=uncompressed,
+/// `1`=ansiX962_compressed_prime, `2`=ansiX962_compressed_char2). Rarely
+/// meaningful in TLS 1.3 ClientHellos but still emitted by some clients
+/// as a fingerprint dimension. SNI backlog A11.
+pub const EXT_EC_POINT_FORMATS: u16 = 0x000b;
+
 /// Extension type for `key_share` (RFC 8446 §4.2.8). We parse the NamedGroup
 /// IDs from the client_shares list (skipping the key_exchange bytes — we
 /// don't need the actual public keys) so Layer 2 can fingerprint
@@ -414,6 +421,12 @@ pub struct ClientHelloMetadata<'a> {
     ///
     /// [`key_share_groups`]: ClientHelloMetadata::key_share_groups
     pub supported_groups: Option<Vec<u16>>,
+    /// The `ec_point_formats` extension (RFC 8422 §5.1.2): a list of
+    /// `u8` ECPointFormat codepoints. TLS 1.2 legacy; rarely meaningful
+    /// in TLS 1.3 ClientHellos but still emitted by some clients as a
+    /// fingerprint dimension. `None` if the extension was absent.
+    /// SNI backlog A11.
+    pub ec_point_formats: Option<Vec<u8>>,
 }
 
 /// Classified ALPN protocol identifier (SNI backlog A2).
@@ -1207,6 +1220,7 @@ pub fn parse_handshake_message_full(handshake: &[u8]) -> Option<ClientHelloMetad
         record_size_limit: None,
         signature_algorithms: None,
         supported_groups: None,
+        ec_point_formats: None,
     };
     // P1: host borrows from the input `handshake` slice; no allocation.
     let mut sni_host: Option<&str> = None;
@@ -1292,6 +1306,9 @@ pub fn parse_handshake_message_full(handshake: &[u8]) -> Option<ClientHelloMetad
             }
             EXT_SUPPORTED_GROUPS => {
                 meta.supported_groups = Some(parse_u16_prefixed_u16_list(ext_data)?);
+            }
+            EXT_EC_POINT_FORMATS => {
+                meta.ec_point_formats = Some(parse_ec_point_formats_extension(ext_data)?);
             }
             _ => {}
         }
@@ -1392,6 +1409,7 @@ pub fn parse_client_hello_full(bytes: &[u8]) -> Option<ClientHelloMetadata<'_>> 
                 record_size_limit: borrowed.record_size_limit,
                 signature_algorithms: borrowed.signature_algorithms,
                 supported_groups: borrowed.supported_groups,
+                ec_point_formats: borrowed.ec_point_formats,
             })
         }
     }
@@ -1421,6 +1439,19 @@ fn parse_alpn_extension(data: &[u8]) -> Option<Vec<Cow<'_, [u8]>>> {
 /// Parse a `u16`-prefixed list of `u16` codepoints. Returns `None` if the
 /// prefix overruns, the list is empty, or the byte length is odd.
 ///
+/// Parse the body of an `ec_point_formats` extension (RFC 8422 §5.1.2):
+/// a `u8`-prefixed list of `u8` ECPointFormat codepoints. Returns `None`
+/// if the prefix overruns or the list is empty (RFC 8422 §5.1.2 requires
+/// at least one entry). SNI backlog A11.
+fn parse_ec_point_formats_extension(data: &[u8]) -> Option<Vec<u8>> {
+    let mut c = Cursor::new(data);
+    let list = c.read_u8_prefixed()?;
+    if list.is_empty() {
+        return None;
+    }
+    Some(list.to_vec())
+}
+
 /// Shared by `signature_algorithms` (RFC 8446 §4.2.3, A9) and
 /// `supported_groups` (RFC 8446 §4.2.7, A10) — both have the same wire
 /// shape (`u16`-prefixed list of `u16` codepoints, non-empty by spec).
@@ -3966,6 +3997,41 @@ mod tests {
     fn supported_groups_rejects_empty_list() {
         let mut exts = build_sni_extension("example.com");
         exts.extend_from_slice(&build_supported_groups_extension(&[]));
+        let bytes = build_client_hello(&exts);
+        assert_eq!(parse_client_hello_full(&bytes), None);
+    }
+
+    // ── A11: ec_point_formats (RFC 8422 §5.1.2) ──────────────────────────────
+
+    fn build_ec_point_formats_extension(formats: &[u8]) -> Vec<u8> {
+        let mut body = Vec::with_capacity(1 + formats.len());
+        body.push(formats.len() as u8);
+        body.extend_from_slice(formats);
+        build_extension(EXT_EC_POINT_FORMATS, &body)
+    }
+
+    #[test]
+    fn ec_point_formats_extracted_in_wire_order() {
+        // Most TLS 1.2 clients send `[0]` (uncompressed only). Some legacy
+        // clients send `[0, 1, 2]` for full compatibility.
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&build_ec_point_formats_extension(&[0, 1, 2]));
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert_eq!(meta.ec_point_formats.as_deref(), Some(&[0, 1, 2][..]));
+    }
+
+    #[test]
+    fn ec_point_formats_none_when_absent() {
+        let bytes = build_client_hello(&build_sni_extension("example.com"));
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(meta.ec_point_formats.is_none());
+    }
+
+    #[test]
+    fn ec_point_formats_rejects_empty_list() {
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&build_ec_point_formats_extension(&[]));
         let bytes = build_client_hello(&exts);
         assert_eq!(parse_client_hello_full(&bytes), None);
     }
