@@ -252,6 +252,15 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **T5 (P1) Post-quantum hybrid corpus.** Done. 2 tests + a `build_pq_chrome_clienthello` fixture that carries a realistic-sized X25519MLKEM768 key share — `REAL_MLKEM768_PUBKEY_LEN = 1216` bytes (X25519 32 + MLKEM768 1184, per RFC 9627). A typical Chrome 2026 CH with PQ hybrid is ~1400 bytes total, an order of magnitude larger than a classical-only CH.
+
+  **Contracts pinned:**
+  - The parser handles the realistic ~1216-byte key_exchange field without tripping any internal length check that was sized for classical key shares (which are ≤ 65 bytes).
+  - `has_post_quantum_key_share` fires; `key_share_groups_classified` surfaces `KeyShareGroup::X25519MlKem768` in client-preference order.
+  - The CH still parses correctly when fragmented across multiple records. PQ key shares are bigger than common record sizes (and TCP MSS), so production traffic from PQ-enabled browsers will *routinely* arrive fragmented. Pinned by `t5_pq_clienthello_survives_two_record_fragmentation`.
+
+  239 tests pass (was 237 — added 2). Clippy clean both feature sets.
+
 - **T4 (P1) ECH-bearing CH (Cloudflare convention).** Done. 3 tests + a `build_cloudflare_ech_clienthello` fixture modeling the canonical Cloudflare ECH wire shape: Chrome-shaped CH with `cloudflare-ech.com` as the outer SNI per Cloudflare's documented rollout (every Cloudflare-hosted ECH connection presents this exact sentinel).
 
   **Contracts pinned:**

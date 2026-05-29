@@ -3557,6 +3557,91 @@ mod tests {
         assert!(!is_cloudflare_ech_outer("example.com"));
     }
 
+    // ── T5: Post-quantum hybrid corpus ───────────────────────────────────────
+    //
+    // X25519MLKEM768 (RFC 9627) key shares have a public-key blob of
+    // X25519(32) + MLKEM768(1184) = 1216 bytes. A typical Chrome 2026 CH
+    // carries this in addition to a classical X25519 share — total
+    // key_share extension body ≈ 1260 bytes, total handshake ≈ 1400 bytes.
+    // That's an order of magnitude larger than a classical-only CH.
+    //
+    // T5 pins that:
+    //
+    // 1. The parser handles the realistic ~1216-byte key_exchange field
+    //    without tripping any internal length check that was sized for
+    //    classical key shares (which are ≤ 65 bytes).
+    // 2. `has_post_quantum_key_share` fires and classification surfaces
+    //    `X25519MlKem768` correctly.
+    // 3. The CH still parses when fragmented across multiple records —
+    //    the PQ key_share alone is bigger than a 1-byte record, so the
+    //    reassembly path *will* be exercised in production for these
+    //    clients.
+
+    const REAL_MLKEM768_PUBKEY_LEN: usize = 1216; // X25519(32) + MLKEM768(1184)
+
+    fn build_pq_chrome_clienthello() -> Vec<u8> {
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("www.example.com"));
+        exts.extend_from_slice(&build_supported_versions_extension(&[0x0304, 0x0303]));
+        exts.extend_from_slice(&build_signature_algorithms_extension(&[
+            0x0403, 0x0804, 0x0401,
+        ]));
+        exts.extend_from_slice(&build_supported_groups_extension(&[0x11ec, 0x001d, 0x0017]));
+        // Realistic key_share: PQ hybrid + classical fallback.
+        let pq_pubkey = vec![0xAB; REAL_MLKEM768_PUBKEY_LEN];
+        let x25519_pubkey = [0xCD; 32];
+        exts.extend_from_slice(&build_key_share_extension(&[
+            (0x11ec, &pq_pubkey),
+            (0x001d, &x25519_pubkey),
+        ]));
+        exts.extend_from_slice(&build_alpn_extension(&[b"h2", b"http/1.1"]));
+        let mut ciphers: Vec<u16> = Vec::new();
+        ciphers.extend_from_slice(TLS_13_CIPHERS);
+        ciphers.extend_from_slice(LEGACY_ECDHE_CIPHERS);
+        build_clienthello_custom_ciphers(&exts, &ciphers)
+    }
+
+    #[test]
+    fn t5_pq_clienthello_parses_with_realistic_key_share_size() {
+        let bytes = build_pq_chrome_clienthello();
+        // Sanity-check the fixture is actually large.
+        assert!(
+            bytes.len() > REAL_MLKEM768_PUBKEY_LEN,
+            "fixture must include the full PQ pubkey: got {} bytes",
+            bytes.len(),
+        );
+        let meta = parse_client_hello_full(&bytes).expect("PQ CH must parse");
+        assert_eq!(meta.host.as_deref(), Some("www.example.com"));
+        assert!(meta.has_post_quantum_key_share());
+        // Classified groups must show X25519MlKem768 as the first entry
+        // (client preference order).
+        let groups = meta
+            .key_share_groups_classified()
+            .expect("key_share present");
+        assert_eq!(
+            groups,
+            vec![KeyShareGroup::X25519MlKem768, KeyShareGroup::X25519],
+        );
+    }
+
+    #[test]
+    fn t5_pq_clienthello_survives_two_record_fragmentation() {
+        // The PQ key_share alone is bigger than any single ~1-byte record,
+        // so production traffic from PQ-enabled browsers will *routinely*
+        // arrive fragmented. Pin that the reassembly path handles a 1400+
+        // byte handshake split mid-stream.
+        let bytes = build_pq_chrome_clienthello();
+        // Extract the inner handshake (strip the outer record header so we
+        // can re-frame with a custom split).
+        let handshake_len = bytes.len() - 5;
+        let handshake = &bytes[5..5 + handshake_len];
+        let split = handshake.len() / 2;
+        let records = build_fragmented_records(handshake, &[split]);
+        let meta = parse_client_hello_full(&records).expect("fragmented PQ CH must parse");
+        assert_eq!(meta.host.as_deref(), Some("www.example.com"));
+        assert!(meta.has_post_quantum_key_share());
+    }
+
     // ── Trailing-bytes tolerance (C9, RFC 8446 §4) ───────────────────────────
 
     /// Local fixture: build a ClientHello whose handshake body has extra bytes
