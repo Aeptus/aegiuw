@@ -3039,6 +3039,106 @@ mod tests {
         assert_eq!(single_meta, frag_meta);
     }
 
+    // ── T2: GREASE-noise fixture ─────────────────────────────────────────────
+    //
+    // Browsers sprinkle GREASE codepoints (RFC 8701) throughout cipher lists
+    // and extension orders to stress-test server implementations into
+    // ignoring unknown values. A parser that doesn't tolerate GREASE around
+    // server_name would mis-extract or reject CHs from every modern browser.
+    // T2 explicitly walks GREASE before / after / sandwiching the SNI
+    // extension and pins that:
+    //
+    // 1. SNI extraction is unaffected by GREASE position;
+    // 2. `extension_order` preserves GREASE in wire order (we filter at the
+    //    fingerprint layer, not the parser layer);
+    // 3. The dup-detection logic (C3/C4) correctly treats two *different*
+    //    GREASE codepoints as distinct extensions.
+
+    #[test]
+    fn t2_grease_extension_before_server_name_extracts_sni() {
+        let mut exts = build_extension(0x0A0A, &[]); // GREASE
+        exts.extend_from_slice(&build_sni_extension("example.com"));
+        let bytes = build_client_hello(&exts);
+        assert_eq!(
+            extract_sni(&bytes),
+            SniOutcome::Cleartext {
+                host: "example.com".into()
+            },
+        );
+    }
+
+    #[test]
+    fn t2_grease_extension_after_server_name_extracts_sni() {
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&build_extension(0xFAFA, &[]));
+        let bytes = build_client_hello(&exts);
+        assert_eq!(
+            extract_sni(&bytes),
+            SniOutcome::Cleartext {
+                host: "example.com".into()
+            },
+        );
+    }
+
+    #[test]
+    fn t2_grease_sandwiches_server_name_extracts_sni() {
+        let mut exts = build_extension(0x1A1A, &[]);
+        exts.extend_from_slice(&build_sni_extension("example.com"));
+        exts.extend_from_slice(&build_extension(0xCACA, &[]));
+        let bytes = build_client_hello(&exts);
+        assert_eq!(
+            extract_sni(&bytes),
+            SniOutcome::Cleartext {
+                host: "example.com".into()
+            },
+        );
+    }
+
+    #[test]
+    fn t2_multiple_distinct_grease_codepoints_dont_trip_dup_detection() {
+        // RFC 8446 §4.2 forbids duplicate extension types, but two *different*
+        // GREASE codepoints (e.g. 0x0A0A and 0x1A1A) are distinct types — the
+        // C3/C4 dup check must not collapse them. A bug here would reject
+        // every modern browser's CH (Chrome sends ~3 GREASE extensions).
+        let mut exts = build_extension(0x0A0A, &[]);
+        exts.extend_from_slice(&build_extension(0x1A1A, &[]));
+        exts.extend_from_slice(&build_extension(0x2A2A, &[]));
+        exts.extend_from_slice(&build_extension(0xFAFA, &[]));
+        exts.extend_from_slice(&build_sni_extension("example.com"));
+        let bytes = build_client_hello(&exts);
+        assert_eq!(
+            extract_sni(&bytes),
+            SniOutcome::Cleartext {
+                host: "example.com".into()
+            },
+        );
+    }
+
+    #[test]
+    fn t2_extension_order_preserves_grease_in_wire_order() {
+        // A12: extension_order is wire-fidelity input for fingerprinting.
+        // The parser must not filter GREASE — filtering happens at the
+        // fingerprint layer (JA3/JA4 strip GREASE before hashing).
+        let mut exts = build_extension(0x0A0A, &[]);
+        exts.extend_from_slice(&build_sni_extension("example.com"));
+        exts.extend_from_slice(&build_extension(0x1A1A, &[]));
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert_eq!(meta.extension_order, vec![0x0A0A, EXT_SERVER_NAME, 0x1A1A]);
+    }
+
+    #[test]
+    fn t2_repeating_same_grease_codepoint_is_still_a_duplicate() {
+        // The dup-detection rule from RFC 8446 §4.2 applies uniformly to
+        // GREASE codepoints too — RFC 8701 doesn't carve out an exception.
+        // Two of the *same* GREASE codepoint must still reject the CH.
+        let mut exts = build_extension(0x0A0A, &[]);
+        exts.extend_from_slice(&build_extension(0x0A0A, &[]));
+        exts.extend_from_slice(&build_sni_extension("example.com"));
+        let bytes = build_client_hello(&exts);
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
     // ── Trailing-bytes tolerance (C9, RFC 8446 §4) ───────────────────────────
 
     /// Local fixture: build a ClientHello whose handshake body has extra bytes

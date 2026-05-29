@@ -252,6 +252,16 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **T2 (P1) GREASE-noise test fixture.** Done. 6 new tests pinning that GREASE codepoints (RFC 8701) before, after, and around the `server_name` extension don't interfere with SNI extraction or extension-order observability. Every modern browser sprinkles ~3 GREASE extensions throughout the wire CH; a parser that mishandled them would reject most production traffic.
+
+  **Contracts pinned:**
+  - SNI extraction unaffected by GREASE position (before / after / sandwiching `server_name`).
+  - Multiple *distinct* GREASE codepoints (0x0A0A + 0x1A1A + 0x2A2A + 0xFAFA) coexist without tripping the C3/C4 duplicate-extension rejection.
+  - `extension_order` (A12) preserves GREASE in wire order — filtering happens at the fingerprint layer (JA3/JA4 strip GREASE before hashing), not the parser layer. This separation matters because some downstream telemetry uses the raw extension_order for fingerprint research.
+  - Two of the **same** GREASE codepoint still trip the dup-detection rule. RFC 8701 doesn't carve out an exception to RFC 8446 §4.2's MUST NOT rule.
+
+  229 tests pass (was 223). Clippy clean both feature sets.
+
 - **T1 (P0) Fragmentation exhaustive test fixture.** Done. Added a dedicated T1 block in `sni.rs`'s test module with 5 new tests pinning the C1 multi-record reassembly fix across a wider surface than the original C1 commit covered.
 
   **Historical context** (captured as a block comment in the test source so future readers see it inline): pre-C1 the parser was single-record-only, so a ClientHello legitimately split across two TLS records — a routine, RFC-permitted shape — would have returned `SniOutcome::Malformed`. That looks safe (we'd route to Isolate) but it's the exact Traefik CVE class: an attacker who can influence packet boundaries hides the SNI and the connection takes the wrong path. The T1 fixture pins that the C1 fix holds across the full space of splits, not just the canonical mid-point.
