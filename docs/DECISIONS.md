@@ -252,6 +252,17 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **T6 (P1) Malformed-corpus truncation sweep.** Done. 3 tests that walk every byte-prefix of known-good ClientHellos and assert `extract_sni` / `parse_client_hello_full` never panic, never read OOB, and always return a stable `SniOutcome::kind()`.
+
+  **Why this complements S2 (proptest):** S2 random-walks the input space looking for panics; T6 is its deterministic complement. Proptest occasionally misses long-running prefixes that linear truncation hits every time, and proptest's shrinking doesn't always cover the maximum-length tail.
+
+  **Tests:**
+  - `t6_truncating_classical_ch_at_every_byte_never_panics` — truncates the T3 Chrome 2026 fixture at every byte 0..=N. Each prefix must return one of the 4 stable `kind()` labels.
+  - `t6_truncating_pq_ch_at_every_byte_never_panics` — same sweep on the T5 ~1400-byte PQ-hybrid CH. Also calls `parse_client_hello_full` on every prefix (post-A1 refactor that path is now independent from `extract_sni`'s projection, so each is exercised separately).
+  - `t6_full_byte_value_space_at_short_lengths_never_panics` — exhaustive 1-byte (256 cases) and 2-byte (65536 cases) input sweep. Proptest covers this in expectation; the deterministic sweep proves it.
+
+  242 tests pass (was 239 — added 3). Clippy clean both feature sets. Total `cargo test` wall time impact remains negligible (the byte-space sweep is ~65k function calls but each call is sub-microsecond on the malformed path).
+
 - **T5 (P1) Post-quantum hybrid corpus.** Done. 2 tests + a `build_pq_chrome_clienthello` fixture that carries a realistic-sized X25519MLKEM768 key share — `REAL_MLKEM768_PUBKEY_LEN = 1216` bytes (X25519 32 + MLKEM768 1184, per RFC 9627). A typical Chrome 2026 CH with PQ hybrid is ~1400 bytes total, an order of magnitude larger than a classical-only CH.
 
   **Contracts pinned:**

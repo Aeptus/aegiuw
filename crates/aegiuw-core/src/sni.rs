@@ -3642,6 +3642,64 @@ mod tests {
         assert!(meta.has_post_quantum_key_share());
     }
 
+    // ── T6: Malformed-corpus truncation sweep ────────────────────────────────
+    //
+    // S2 (proptest) random-walks the input space looking for panics. T6 is
+    // its deterministic complement: take a known-good CH and truncate at
+    // every byte position 1..N. Every prefix must produce *some*
+    // SniOutcome — not a panic, not an OOB read. Proptest occasionally
+    // misses long-running prefixes that linear truncation hits every time.
+    //
+    // We also walk truncation of the T5 PQ-hybrid fixture (the longest CH
+    // we have) so the sweep covers the high-length tail that classical
+    // CHs don't reach.
+
+    #[test]
+    fn t6_truncating_classical_ch_at_every_byte_never_panics() {
+        let bytes = build_chrome_2026_clienthello();
+        for prefix_len in 0..=bytes.len() {
+            let prefix = &bytes[..prefix_len];
+            // The contract: a *function call* with any prefix returns
+            // *some* SniOutcome variant. No panic, no abort, no UB.
+            let outcome = extract_sni(prefix);
+            // Sanity: outcome.kind() returns one of the four stable labels.
+            let kind = outcome.kind();
+            assert!(
+                matches!(kind, "cleartext" | "encrypted" | "not_found" | "malformed"),
+                "prefix_len={prefix_len}: unexpected outcome kind {kind:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn t6_truncating_pq_ch_at_every_byte_never_panics() {
+        // Same sweep but on the PQ-hybrid CH, which is roughly 1400 bytes
+        // — covers the long-input range that classical fixtures skip.
+        let bytes = build_pq_chrome_clienthello();
+        for prefix_len in 0..=bytes.len() {
+            let prefix = &bytes[..prefix_len];
+            let _ = extract_sni(prefix);
+            // Also exercise parse_client_hello_full (full metadata path,
+            // separate code path from extract_sni's projection — pre-A1
+            // it would have been the same path, but A1's refactor made
+            // it independent, so truncation must be safe on both).
+            let _ = parse_client_hello_full(prefix);
+        }
+    }
+
+    #[test]
+    fn t6_full_byte_value_space_at_short_lengths_never_panics() {
+        // Bonus belt-and-suspenders: every single-byte input across the
+        // full u8 space, and every 2-byte input, must be safe. Proptest
+        // covers this in expectation but a deterministic sweep proves it.
+        for b in 0..=255u8 {
+            let _ = extract_sni(&[b]);
+            for c in 0..=255u8 {
+                let _ = extract_sni(&[b, c]);
+            }
+        }
+    }
+
     // ── Trailing-bytes tolerance (C9, RFC 8446 §4) ───────────────────────────
 
     /// Local fixture: build a ClientHello whose handshake body has extra bytes
