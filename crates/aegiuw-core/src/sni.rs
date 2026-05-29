@@ -421,6 +421,133 @@ impl ClientHelloMetadata<'_> {
             Some(protos) => protos.iter().any(|p| AlpnProtocol::from_wire(p) == proto),
         }
     }
+
+    /// Classify every offered TLS version in wire order. Returns `None` if
+    /// the `supported_versions` extension was absent — in which case the
+    /// client offers up to TLS 1.2 (our strictness layer enforces
+    /// `legacy_version == 0x0303`, so a `None` here strictly means "TLS 1.2
+    /// or older, no extension-based negotiation").
+    ///
+    /// SNI backlog A3.
+    pub fn supported_versions_classified(&self) -> Option<Vec<TlsVersion>> {
+        self.supported_versions
+            .as_ref()
+            .map(|versions| versions.iter().map(|&v| TlsVersion::from_wire(v)).collect())
+    }
+
+    /// `true` if the client advertised the given TLS version. For TLS 1.3,
+    /// this looks at the `supported_versions` extension (the only place
+    /// 1.3 is signalled). For older versions, the extension may be absent
+    /// and the legacy `0x0303` in the ClientHello header carries the
+    /// version — in which case only `TlsVersion::Tls12` returns `true`.
+    ///
+    /// SNI backlog A3.
+    pub fn offers_tls_version(&self, version: TlsVersion) -> bool {
+        match &self.supported_versions {
+            Some(versions) => versions
+                .iter()
+                .any(|&v| TlsVersion::from_wire(v) == version),
+            // Extension absent: only TLS 1.2 is implicitly offered (our
+            // parser enforces legacy_version == 0x0303 = TLS 1.2 wire).
+            None => matches!(version, TlsVersion::Tls12),
+        }
+    }
+
+    /// Highest TLS version the client advertised. Filters out GREASE and
+    /// unknown codepoints ([`TlsVersion::Other`]) before computing the max,
+    /// so a fuzzing client can't fool a "modern enough?" check by listing
+    /// a phantom version.
+    ///
+    /// Falls back to [`TlsVersion::Tls12`] when the `supported_versions`
+    /// extension is absent — our strictness layer enforces the
+    /// `legacy_version == 0x0303` wire value, so TLS 1.2 is the implicit
+    /// ceiling for any CH that lacks the extension.
+    ///
+    /// SNI backlog A3.
+    pub fn highest_supported_tls_version(&self) -> TlsVersion {
+        match &self.supported_versions {
+            None => TlsVersion::Tls12,
+            Some(versions) => versions
+                .iter()
+                .map(|&v| TlsVersion::from_wire(v))
+                .filter(|v| !matches!(v, TlsVersion::Other))
+                .max()
+                .unwrap_or(TlsVersion::Tls12),
+        }
+    }
+}
+
+/// Classified TLS protocol version (SNI backlog A3).
+///
+/// Layer 2 (the local risk engine) needs to ask "is this a TLS 1.3 client?"
+/// or "is this dangerously old?" without juggling wire codepoints. This enum
+/// collapses the wire `u16` values to the five protocol versions plus
+/// [`TlsVersion::Other`] for GREASE / unknown.
+///
+/// **Ordering:** `Other` sorts *lowest* (variant declaration order) so
+/// `version >= TlsVersion::Tls13` correctly excludes GREASE — the
+/// alternative would let a fuzzing client fool the check by listing a
+/// codepoint we don't recognise.
+///
+/// **Versus the `legacy_version` field:** every TLS 1.2/1.3 ClientHello
+/// carries `legacy_version = 0x0303` for middlebox compatibility (RFC 8446
+/// §4.1.2), so the legacy field is *not* a version signal. The
+/// `supported_versions` extension is the only place TLS 1.3 is advertised;
+/// see [`ClientHelloMetadata::supported_versions`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TlsVersion {
+    /// GREASE codepoint, future TLS version, or any other value we don't
+    /// recognise. Sorts *lowest* so `>= Tls13` and similar checks exclude it.
+    Other,
+    /// SSL 3.0 — wire value `0x0300`. Deprecated by RFC 7568.
+    Ssl30,
+    /// TLS 1.0 — wire value `0x0301`. Deprecated by RFC 8996.
+    Tls10,
+    /// TLS 1.1 — wire value `0x0302`. Deprecated by RFC 8996.
+    Tls11,
+    /// TLS 1.2 — wire value `0x0303`.
+    Tls12,
+    /// TLS 1.3 — wire value `0x0304`. RFC 8446.
+    Tls13,
+}
+
+impl TlsVersion {
+    /// Classify a single TLS version from its `u16` wire value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aegiuw_core::TlsVersion;
+    ///
+    /// assert_eq!(TlsVersion::from_wire(0x0304), TlsVersion::Tls13);
+    /// assert_eq!(TlsVersion::from_wire(0x0303), TlsVersion::Tls12);
+    /// // GREASE codepoints (RFC 8701) collapse to Other.
+    /// assert_eq!(TlsVersion::from_wire(0x0A0A), TlsVersion::Other);
+    /// ```
+    pub fn from_wire(value: u16) -> Self {
+        match value {
+            0x0300 => Self::Ssl30,
+            0x0301 => Self::Tls10,
+            0x0302 => Self::Tls11,
+            0x0303 => Self::Tls12,
+            0x0304 => Self::Tls13,
+            _ => Self::Other,
+        }
+    }
+
+    /// Stable lowercase string for telemetry dimensions (mirrors the
+    /// [`SniOutcome::kind`] / [`AlpnProtocol::kind`] O2 convention).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Ssl30 => "ssl_3_0",
+            Self::Tls10 => "tls_1_0",
+            Self::Tls11 => "tls_1_1",
+            Self::Tls12 => "tls_1_2",
+            Self::Tls13 => "tls_1_3",
+            Self::Other => "other",
+        }
+    }
 }
 
 /// Parse the supplied bytes as a TLS ClientHello and report what was observed
@@ -2938,6 +3065,136 @@ mod tests {
             meta.offers(AlpnProtocol::Http3),
             "draft h3-29 must classify as Http3",
         );
+    }
+
+    // ── A3: TlsVersion classification ────────────────────────────────────────
+
+    #[test]
+    fn tls_version_classifies_the_known_wire_codepoints() {
+        assert_eq!(TlsVersion::from_wire(0x0300), TlsVersion::Ssl30);
+        assert_eq!(TlsVersion::from_wire(0x0301), TlsVersion::Tls10);
+        assert_eq!(TlsVersion::from_wire(0x0302), TlsVersion::Tls11);
+        assert_eq!(TlsVersion::from_wire(0x0303), TlsVersion::Tls12);
+        assert_eq!(TlsVersion::from_wire(0x0304), TlsVersion::Tls13);
+        // GREASE codepoints (RFC 8701): the high and low bytes are equal,
+        // bits 0..4 are 0xA. We see them in real ClientHellos as filler.
+        assert_eq!(TlsVersion::from_wire(0x0A0A), TlsVersion::Other);
+        assert_eq!(TlsVersion::from_wire(0x1A1A), TlsVersion::Other);
+        // Future TLS 1.4 codepoint → Other (must not be silently treated
+        // as Tls13 or anything else known).
+        assert_eq!(TlsVersion::from_wire(0x0305), TlsVersion::Other);
+        // Zero and max also Other.
+        assert_eq!(TlsVersion::from_wire(0x0000), TlsVersion::Other);
+        assert_eq!(TlsVersion::from_wire(0xFFFF), TlsVersion::Other);
+    }
+
+    #[test]
+    fn tls_version_kind_strings_are_stable_snake_case() {
+        // O2 dashboard contract — any change here breaks downstream.
+        assert_eq!(TlsVersion::Ssl30.kind(), "ssl_3_0");
+        assert_eq!(TlsVersion::Tls10.kind(), "tls_1_0");
+        assert_eq!(TlsVersion::Tls11.kind(), "tls_1_1");
+        assert_eq!(TlsVersion::Tls12.kind(), "tls_1_2");
+        assert_eq!(TlsVersion::Tls13.kind(), "tls_1_3");
+        assert_eq!(TlsVersion::Other.kind(), "other");
+    }
+
+    #[test]
+    fn tls_version_ord_puts_other_below_every_known_version() {
+        // The whole point of putting Other first in declaration order: a
+        // "modern enough?" check like `>= Tls13` must reject GREASE.
+        assert!(TlsVersion::Other < TlsVersion::Ssl30);
+        assert!(TlsVersion::Other < TlsVersion::Tls13);
+        // Known versions sort in ascending TLS protocol order.
+        assert!(TlsVersion::Ssl30 < TlsVersion::Tls10);
+        assert!(TlsVersion::Tls10 < TlsVersion::Tls11);
+        assert!(TlsVersion::Tls11 < TlsVersion::Tls12);
+        assert!(TlsVersion::Tls12 < TlsVersion::Tls13);
+        // The two common Layer-2 queries.
+        assert!(TlsVersion::Tls13 >= TlsVersion::Tls13);
+        assert!(TlsVersion::Other < TlsVersion::Tls13);
+    }
+
+    #[test]
+    fn supported_versions_classified_preserves_wire_order() {
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("example.com"));
+        // Client preference order: 1.3 first, 1.2 fallback. Pin that
+        // classified output preserves it (downstream "first acceptable"
+        // selectors rely on this).
+        exts.extend_from_slice(&build_supported_versions_extension(&[0x0304, 0x0303]));
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert_eq!(
+            meta.supported_versions_classified().as_deref(),
+            Some(&[TlsVersion::Tls13, TlsVersion::Tls12][..]),
+        );
+    }
+
+    #[test]
+    fn supported_versions_classified_is_none_when_extension_absent() {
+        let bytes = build_client_hello(&build_sni_extension("example.com"));
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(meta.supported_versions_classified().is_none());
+    }
+
+    #[test]
+    fn highest_supported_tls_version_picks_max_excluding_grease() {
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("example.com"));
+        // 1.2 + 1.3 + GREASE: highest must be 1.3, GREASE must not contribute.
+        exts.extend_from_slice(&build_supported_versions_extension(&[
+            0x0A0A, 0x0303, 0x0304,
+        ]));
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert_eq!(meta.highest_supported_tls_version(), TlsVersion::Tls13);
+    }
+
+    #[test]
+    fn highest_supported_tls_version_falls_back_to_tls12_without_extension() {
+        // Parser enforces legacy_version == 0x0303, so absent extension
+        // means TLS 1.2 is the implicit ceiling.
+        let bytes = build_client_hello(&build_sni_extension("example.com"));
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert_eq!(meta.highest_supported_tls_version(), TlsVersion::Tls12);
+    }
+
+    #[test]
+    fn highest_supported_tls_version_falls_back_to_tls12_when_only_grease() {
+        // Pathological CH: supported_versions present but every entry is
+        // GREASE. Filter empties; fall back to Tls12 rather than panic on
+        // .max().unwrap().
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("example.com"));
+        exts.extend_from_slice(&build_supported_versions_extension(&[0x0A0A, 0x1A1A]));
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert_eq!(meta.highest_supported_tls_version(), TlsVersion::Tls12);
+    }
+
+    #[test]
+    fn offers_tls_version_when_extension_present() {
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("example.com"));
+        exts.extend_from_slice(&build_supported_versions_extension(&[0x0304, 0x0303]));
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(meta.offers_tls_version(TlsVersion::Tls13));
+        assert!(meta.offers_tls_version(TlsVersion::Tls12));
+        assert!(!meta.offers_tls_version(TlsVersion::Tls11));
+        assert!(!meta.offers_tls_version(TlsVersion::Ssl30));
+    }
+
+    #[test]
+    fn offers_tls_version_implicit_tls12_without_extension() {
+        // Without the extension we implicitly know only TLS 1.2 (legacy_version
+        // is enforced to 0x0303); offers_tls_version mirrors this.
+        let bytes = build_client_hello(&build_sni_extension("example.com"));
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(meta.offers_tls_version(TlsVersion::Tls12));
+        assert!(!meta.offers_tls_version(TlsVersion::Tls13));
+        assert!(!meta.offers_tls_version(TlsVersion::Tls11));
     }
 
     #[test]

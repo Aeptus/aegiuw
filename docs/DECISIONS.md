@@ -252,6 +252,23 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **A3 (P1) `supported_versions` classification — `TlsVersion` enum + helpers.** Done. Same shape as A2 (`AlpnProtocol`) but for TLS protocol versions. Layer 2 can now ask "is this a modern client?" or "is this dangerously old?" without juggling wire `u16` codepoints.
+
+  **New public surface:**
+  - `pub enum TlsVersion { Other, Ssl30, Tls10, Tls11, Tls12, Tls13 }` — `#[derive(PartialOrd, Ord, Serialize, Deserialize)]` with `rename_all = "snake_case"`. Variant declaration order matters: **`Other` first** so it sorts lowest. That makes `version >= TlsVersion::Tls13` correctly exclude GREASE — the alternative (sort `Other` highest) would let a fuzzing client fool a "modern enough?" check.
+  - `TlsVersion::from_wire(value: u16) -> Self` — matches `0x0300`–`0x0304`; everything else (including GREASE codepoints `0x0A0A`, `0x1A1A`, …, and future TLS 1.4 `0x0305`) collapses to `Other`.
+  - `TlsVersion::kind() -> &'static str` — stable telemetry labels (`ssl_3_0`, `tls_1_0`, …, `tls_1_3`, `other`) matching the O2 / A2 convention.
+  - `ClientHelloMetadata::supported_versions_classified() -> Option<Vec<TlsVersion>>` — classify every offered version in wire order. `None` if the extension was absent.
+  - `ClientHelloMetadata::offers_tls_version(TlsVersion) -> bool` — true iff the client advertised that version. When the extension is *absent*, returns true only for `Tls12` (our parser enforces `legacy_version == 0x0303`).
+  - `ClientHelloMetadata::highest_supported_tls_version() -> TlsVersion` — max of offered versions, filtering out `Other` first. Falls back to `Tls12` when the extension is absent *or* when every entry was `Other` (so this never returns the meaningless `Other`).
+
+  **Key design decisions:**
+  - **`legacy_version` is not a version signal.** Every TLS 1.2/1.3 ClientHello carries `legacy_version = 0x0303` for middlebox compatibility (RFC 8446 §4.1.2). The `supported_versions` extension is the *only* place TLS 1.3 is advertised. Our parser enforces the legacy field as `0x0303` upstream, so an absent `supported_versions` extension is the implicit "TLS 1.2, no extension-based negotiation" signal — encoded in `offers_tls_version`'s fallback branch.
+  - **GREASE doesn't contribute to `highest_supported_tls_version`.** Filtering before `.max()` is what makes the helper trustworthy. A naive max-of-classified would still return the highest *real* version (since GREASE = `Other` sorts lowest), but explicit filtering makes the intent obvious in code review and avoids any risk of misuse if someone changes the ordering later.
+  - **The "every entry is GREASE" pathological case** (a CH where `supported_versions` is present but every codepoint is unrecognised) falls back to `Tls12` rather than panicking — pinned by `highest_supported_tls_version_falls_back_to_tls12_when_only_grease`.
+
+  **Stats:** 139 tests pass (was 128 — added 11 unit tests + 1 doctest on `TlsVersion::from_wire`). Clippy clean for std `--all-targets` and `--no-default-features --lib`. No allocation regressions on the hot path; the classification helpers walk the existing `Vec<u16>` field and allocate at most one small `Vec<TlsVersion>` on call.
+
 - **A2 (P1) ALPN classification — `AlpnProtocol` enum + helpers.** Done. Added `pub enum AlpnProtocol { Http10, Http11, Http2, Http3, Other }` with three associated methods and two helpers on `ClientHelloMetadata`. Layer 2 can now ask "did the client offer HTTP/3?" without comparing byte strings.
 
   **New public surface:**
