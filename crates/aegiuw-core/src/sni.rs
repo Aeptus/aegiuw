@@ -1409,6 +1409,42 @@ pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome<'_>> {
     })
 }
 
+/// QUIC-friendly entry point that parses an already-reassembled TLS
+/// handshake message into an [`SniOutcome`]. Identical to
+/// [`parse_handshake_message`] — provided under the QUIC team's preferred
+/// name so call sites stay self-explanatory: "this input is
+/// handshake-only, no TLS record framing."
+///
+/// SNI backlog Q1.
+///
+/// # When to call this vs the other entry points
+///
+/// | Entry point | Input shape | Returns |
+/// |---|---|---|
+/// | [`extract_sni`] | record-framed bytes (one or more TLS records) | [`SniOutcome`] |
+/// | [`parse_record`] | record-framed bytes | reassembled handshake `Cow<[u8]>` |
+/// | [`parse_handshake_only`] (this fn) | handshake-only bytes | `Option<SniOutcome>` |
+/// | [`parse_handshake_message_full`] | handshake-only bytes | full [`ClientHelloMetadata`] |
+///
+/// The QUIC parser reassembles `CRYPTO` frames into the inner TLS
+/// handshake message, then passes those bytes directly to this function —
+/// no need to re-wrap in a fake TLS record header.
+///
+/// # Examples
+///
+/// ```
+/// use aegiuw_core::{parse_handshake_only, SniOutcome};
+///
+/// assert_eq!(parse_handshake_only(&[]), None);
+/// assert_eq!(
+///     parse_handshake_only(&[0x02, 0x00, 0x00, 0x00]),
+///     Some(SniOutcome::Malformed),
+/// );
+/// ```
+pub fn parse_handshake_only(handshake: &[u8]) -> Option<SniOutcome<'_>> {
+    parse_handshake_message(handshake)
+}
+
 /// Parse a TLS ClientHello (records-level entry) into the full set of
 /// observable fields (SNI backlog A1).
 ///
@@ -4336,6 +4372,45 @@ mod tests {
         exts.extend_from_slice(&ext);
         let bytes = build_client_hello(&exts);
         assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    // ── Q1: parse_handshake_only alias ───────────────────────────────────────
+
+    #[test]
+    fn q1_parse_handshake_only_matches_parse_handshake_message() {
+        // Pin the alias contract: parse_handshake_only and
+        // parse_handshake_message must return identical outcomes on every
+        // input shape we care about. A future divergence in either function
+        // must update the other.
+        let handshake = build_handshake_message(&build_sni_extension("example.com"));
+        assert_eq!(
+            parse_handshake_only(&handshake),
+            parse_handshake_message(&handshake),
+        );
+        // Boundary inputs.
+        for input in [
+            &[][..],
+            &[HANDSHAKE_TYPE_CLIENT_HELLO][..],
+            &[0x02, 0x00, 0x00, 0x00][..], // wrong handshake type
+            &[0xff, 0xff, 0xff][..],
+        ] {
+            assert_eq!(parse_handshake_only(input), parse_handshake_message(input));
+        }
+    }
+
+    #[test]
+    fn q1_parse_handshake_only_accepts_handshake_without_record_header() {
+        // The headline QUIC use case: pass reassembled CRYPTO-frame bytes
+        // (which are handshake-only, no TLS record header) directly into
+        // the parser. Must extract SNI as if we'd gone through the record path.
+        let handshake = build_handshake_message(&build_sni_extension("example.com"));
+        let outcome = parse_handshake_only(&handshake).expect("handshake parses");
+        assert_eq!(
+            outcome,
+            SniOutcome::Cleartext {
+                host: "example.com".into()
+            },
+        );
     }
 
     // ── Trailing-bytes tolerance (C9, RFC 8446 §4) ───────────────────────────

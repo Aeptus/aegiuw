@@ -252,6 +252,23 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **Q1 (P1) `parse_handshake_only` entry point for QUIC.** Done. Added `pub fn parse_handshake_only(handshake: &[u8]) -> Option<SniOutcome<'_>>` as a thin alias for `parse_handshake_message`. The function already accepted handshake-only bytes (no TLS record framing) — Q1 just gives the QUIC team a call site name that's self-explanatory: "this input is handshake-only."
+
+  **Why an alias, not a rename:** `parse_handshake_message` is already documented as the QUIC reuse path (its docstring has said "Made `pub` so the upcoming QUIC parser can feed already-stripped CRYPTO-frame bytes here" since C2). Renaming would break callers; aliasing is additive and zero-cost.
+
+  **QUIC entry point matrix pinned in docs:**
+
+  | Entry point | Input shape | Returns |
+  |---|---|---|
+  | `extract_sni` | record-framed bytes | `SniOutcome` |
+  | `parse_record` (Q2) | record-framed bytes | reassembled handshake `Cow<[u8]>` |
+  | `parse_handshake_only` (Q1, this fn) | handshake-only bytes | `Option<SniOutcome>` |
+  | `parse_handshake_message_full` | handshake-only bytes | full `ClientHelloMetadata` |
+
+  Alias contract pinned by `q1_parse_handshake_only_matches_parse_handshake_message` (outputs identical on every shape we test) and `q1_parse_handshake_only_accepts_handshake_without_record_header`.
+
+  280 tests pass (was 277 — +2 unit + 1 doctest). Clippy clean both feature sets.
+
 - **T17 (P3) Length-prefix overflow tests (per-? site coverage).** Done. 21 named tests targeting each *category* of length-prefix overrun in the parser. T6 (truncation sweep) already proves no-panic at every prefix position; T17 labels the specific structural failure points so a test-plan reader can grep for the named category.
 
   **Categories covered** (each maps to a cluster of `?` sites in `parse_handshake_message_full` / `reassemble_handshake` / `parse_server_name_extension` / extension-specific parsers):
