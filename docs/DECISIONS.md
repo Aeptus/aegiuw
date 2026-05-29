@@ -252,6 +252,12 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **A10 (P3) Expose `supported_groups` (RFC 8446 §4.2.7).** Done. Added `pub const EXT_SUPPORTED_GROUPS: u16 = 0x000a` and `pub supported_groups: Option<Vec<u16>>` on `ClientHelloMetadata`. Reuses A9's `parse_u16_prefixed_u16_list` (same wire shape).
+
+  **Semantic distinction from `key_share_groups` pinned by `supported_groups_distinct_from_key_share_groups`:** `supported_groups` is the *could-use* list; `key_share` is the (usually shorter) subset for which the client actually shipped public keys for the first-round handshake. A client that lists X25519MLKEM768 in `supported_groups` but not in `key_share` is signalling "I can do PQ if the server asks for it via HRR" without paying the extra bytes upfront.
+
+  4 new tests; 172 total (was 168). Clippy clean both feature sets.
+
 - **A9 (P3) Expose `signature_algorithms` (RFC 8446 §4.2.3).** Done. Added `pub const EXT_SIGNATURE_ALGORITHMS: u16 = 0x000d` and `pub signature_algorithms: Option<Vec<u16>>` on `ClientHelloMetadata`. High-fidelity fingerprint dimension — algorithms and order vary by client/browser version.
 
   **Shared parser**: introduced `parse_u16_prefixed_u16_list` covering both A9 and A10 (`supported_groups` — same wire shape). RFC strictness: non-empty list, even byte length.

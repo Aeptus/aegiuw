@@ -192,6 +192,12 @@ pub const EXT_RECORD_SIZE_LIMIT: u16 = 0x001c;
 /// order. SNI backlog A9.
 pub const EXT_SIGNATURE_ALGORITHMS: u16 = 0x000d;
 
+/// Extension type for `supported_groups` (RFC 8446 §4.2.7). Body is a
+/// `u16`-prefixed list of `u16` NamedGroup codepoints — the groups the
+/// client could use (distinct from `key_share` which is the subset for
+/// which the client actually shipped public keys). SNI backlog A10.
+pub const EXT_SUPPORTED_GROUPS: u16 = 0x000a;
+
 /// Extension type for `key_share` (RFC 8446 §4.2.8). We parse the NamedGroup
 /// IDs from the client_shares list (skipping the key_exchange bytes — we
 /// don't need the actual public keys) so Layer 2 can fingerprint
@@ -394,6 +400,20 @@ pub struct ClientHelloMetadata<'a> {
     /// High-fidelity fingerprint dimension — algorithms and ordering
     /// vary by client / browser version. SNI backlog A9.
     pub signature_algorithms: Option<Vec<u16>>,
+    /// The `supported_groups` extension (RFC 8446 §4.2.7): the list of
+    /// NamedGroup codepoints the client could use, in wire order. `None`
+    /// if the extension was absent.
+    ///
+    /// Distinct from [`key_share_groups`] — `supported_groups` is the
+    /// *could-use* list; `key_share` is the (usually shorter) subset for
+    /// which the client actually shipped public keys for the first-round
+    /// handshake. A client that lists X25519MLKEM768 in `supported_groups`
+    /// but not in `key_share` is signalling "I can do PQ if the server
+    /// asks for it via HRR" without paying the bytes upfront.
+    /// SNI backlog A10.
+    ///
+    /// [`key_share_groups`]: ClientHelloMetadata::key_share_groups
+    pub supported_groups: Option<Vec<u16>>,
 }
 
 /// Classified ALPN protocol identifier (SNI backlog A2).
@@ -1186,6 +1206,7 @@ pub fn parse_handshake_message_full(handshake: &[u8]) -> Option<ClientHelloMetad
         compress_certificate_present: false,
         record_size_limit: None,
         signature_algorithms: None,
+        supported_groups: None,
     };
     // P1: host borrows from the input `handshake` slice; no allocation.
     let mut sni_host: Option<&str> = None;
@@ -1268,6 +1289,9 @@ pub fn parse_handshake_message_full(handshake: &[u8]) -> Option<ClientHelloMetad
             }
             EXT_SIGNATURE_ALGORITHMS => {
                 meta.signature_algorithms = Some(parse_u16_prefixed_u16_list(ext_data)?);
+            }
+            EXT_SUPPORTED_GROUPS => {
+                meta.supported_groups = Some(parse_u16_prefixed_u16_list(ext_data)?);
             }
             _ => {}
         }
@@ -1367,6 +1391,7 @@ pub fn parse_client_hello_full(bytes: &[u8]) -> Option<ClientHelloMetadata<'_>> 
                 compress_certificate_present: borrowed.compress_certificate_present,
                 record_size_limit: borrowed.record_size_limit,
                 signature_algorithms: borrowed.signature_algorithms,
+                supported_groups: borrowed.supported_groups,
             })
         }
     }
@@ -3879,6 +3904,68 @@ mod tests {
             EXT_SIGNATURE_ALGORITHMS,
             &[0x00, 0x03, 0x04, 0x03, 0x08],
         ));
+        let bytes = build_client_hello(&exts);
+        assert_eq!(parse_client_hello_full(&bytes), None);
+    }
+
+    // ── A10: supported_groups (RFC 8446 §4.2.7) ──────────────────────────────
+
+    fn build_supported_groups_extension(groups: &[u16]) -> Vec<u8> {
+        let mut list: Vec<u8> = Vec::new();
+        for g in groups {
+            list.extend_from_slice(&g.to_be_bytes());
+        }
+        let mut body = Vec::new();
+        body.extend_from_slice(&(list.len() as u16).to_be_bytes());
+        body.extend_from_slice(&list);
+        build_extension(EXT_SUPPORTED_GROUPS, &body)
+    }
+
+    #[test]
+    fn supported_groups_extracted_in_wire_order() {
+        // Realistic Chrome 2026 offer: X25519MLKEM768 + X25519 + secp256r1
+        // + secp384r1 + secp521r1.
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&build_supported_groups_extension(&[
+            0x11ec, 0x001d, 0x0017, 0x0018, 0x0019,
+        ]));
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert_eq!(
+            meta.supported_groups.as_deref(),
+            Some(&[0x11ec, 0x001d, 0x0017, 0x0018, 0x0019][..]),
+        );
+    }
+
+    #[test]
+    fn supported_groups_none_when_absent() {
+        let bytes = build_client_hello(&build_sni_extension("example.com"));
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(meta.supported_groups.is_none());
+    }
+
+    #[test]
+    fn supported_groups_distinct_from_key_share_groups() {
+        // Pin the semantic distinction: client can list more groups in
+        // supported_groups than in key_share. A real Chrome CH typically
+        // does this — supported_groups names ~5 groups, key_share supplies
+        // shares for only the top 2.
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&build_supported_groups_extension(&[0x11ec, 0x001d, 0x0017]));
+        exts.extend_from_slice(&build_key_share_extension(&[(0x11ec, &[0xAA; 32])]));
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert_eq!(
+            meta.supported_groups.as_deref(),
+            Some(&[0x11ec, 0x001d, 0x0017][..]),
+        );
+        assert_eq!(meta.key_share_groups.as_deref(), Some(&[0x11ec][..]));
+    }
+
+    #[test]
+    fn supported_groups_rejects_empty_list() {
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&build_supported_groups_extension(&[]));
         let bytes = build_client_hello(&exts);
         assert_eq!(parse_client_hello_full(&bytes), None);
     }
