@@ -1091,6 +1091,33 @@ mod tests {
         assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
     }
 
+    // ── Allocation cap holds under drip-feed (S7) ────────────────────────────
+
+    #[test]
+    fn allocation_cap_holds_against_drip_feed_of_small_records() {
+        // Strongest version of the cap test: the first record's handshake
+        // header claims a u24 body length of 0xFFFFFF (≈ 16 MB), then we
+        // send a stream of small records the attacker would *like* us to
+        // keep buffering. The cap in `reassemble_handshake` must fire after
+        // MAX_HANDSHAKE_BYTES (64 KiB), never approaching the 16 MB claim.
+        let mut bytes = Vec::new();
+
+        let mut first = Vec::new();
+        first.push(HANDSHAKE_TYPE_CLIENT_HELLO);
+        first.extend_from_slice(&[0xFF, 0xFF, 0xFF]); // claim 16 MiB body
+        first.extend_from_slice(&[0xAA; 4_000]); // start the drip
+        bytes.extend_from_slice(&wrap_record(CONTENT_TYPE_HANDSHAKE, &first));
+
+        // 16 more records of 4 KB each → 64 KB additional → trips the cap.
+        // Sender hopes we'll keep buffering all the way to 16 MB; we don't.
+        for _ in 0..16 {
+            bytes.extend_from_slice(&wrap_record(CONTENT_TYPE_HANDSHAKE, &[0xBB; 4_000]));
+        }
+
+        assert_eq!(reassemble_handshake(&bytes), None);
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
     // ── Maximum-size single record within budget (S4) ────────────────────────
 
     #[test]
