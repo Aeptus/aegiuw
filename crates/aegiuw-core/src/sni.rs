@@ -3884,6 +3884,175 @@ mod tests {
         assert_eq!(extract_sni(&bytes6), SniOutcome::Malformed);
     }
 
+    // ── T16: Snapshot tests for the O1 trace event shape ─────────────────────
+    //
+    // Pin the wire shape of the `extract_sni` trace event (target, outcome
+    // kind, byte_count, duration_us) against silent regressions. The O3 /
+    // O2 contracts let downstream dashboards bucket and group on these
+    // fields — a refactor that renamed `duration_us` to `duration_micros`
+    // or `outcome` to `verdict` would silently break every dashboard. T16
+    // catches that at test time.
+    //
+    // Implementation: a small custom `tracing_subscriber::Layer` records
+    // events into a Mutex<Vec<…>>. Each test installs the layer via
+    // `tracing::subscriber::with_default`, runs `extract_sni`, then
+    // inspects the captured event.
+
+    mod t16_trace_capture {
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+
+        use tracing::field::{Field, Visit};
+        use tracing::Subscriber;
+        use tracing_subscriber::layer::{Context, Layer};
+
+        /// Captured field shape — `BTreeMap` for stable ordering when
+        /// asserting `Debug` output in snapshot diffs.
+        #[derive(Debug, Default, Clone)]
+        pub(super) struct CapturedEvent {
+            pub target: String,
+            pub level: String,
+            pub fields: BTreeMap<String, String>,
+        }
+
+        #[derive(Default, Clone)]
+        pub(super) struct CapturedEvents(pub(super) Arc<Mutex<Vec<CapturedEvent>>>);
+
+        impl CapturedEvents {
+            pub fn new() -> Self {
+                Self::default()
+            }
+
+            pub fn drain(&self) -> Vec<CapturedEvent> {
+                core::mem::take(&mut self.0.lock().unwrap())
+            }
+        }
+
+        struct EventVisitor<'a>(&'a mut CapturedEvent);
+
+        impl Visit for EventVisitor<'_> {
+            fn record_str(&mut self, field: &Field, value: &str) {
+                self.0
+                    .fields
+                    .insert(field.name().to_string(), value.to_string());
+            }
+            fn record_u64(&mut self, field: &Field, value: u64) {
+                self.0
+                    .fields
+                    .insert(field.name().to_string(), value.to_string());
+            }
+            fn record_i64(&mut self, field: &Field, value: i64) {
+                self.0
+                    .fields
+                    .insert(field.name().to_string(), value.to_string());
+            }
+            fn record_bool(&mut self, field: &Field, value: bool) {
+                self.0
+                    .fields
+                    .insert(field.name().to_string(), value.to_string());
+            }
+            fn record_debug(&mut self, field: &Field, value: &dyn core::fmt::Debug) {
+                self.0
+                    .fields
+                    .insert(field.name().to_string(), format!("{value:?}"));
+            }
+        }
+
+        impl<S: Subscriber> Layer<S> for CapturedEvents {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                let metadata = event.metadata();
+                let mut captured = CapturedEvent {
+                    target: metadata.target().to_string(),
+                    level: metadata.level().to_string(),
+                    ..Default::default()
+                };
+                event.record(&mut EventVisitor(&mut captured));
+                self.0.lock().unwrap().push(captured);
+            }
+        }
+    }
+
+    fn capture_events<F: FnOnce()>(f: F) -> Vec<t16_trace_capture::CapturedEvent> {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let captured = t16_trace_capture::CapturedEvents::new();
+        let subscriber = tracing_subscriber::Registry::default().with(captured.clone());
+        tracing::subscriber::with_default(subscriber, f);
+        captured.drain()
+    }
+
+    #[test]
+    fn t16_cleartext_emits_structured_trace_event() {
+        let bytes = build_client_hello(&build_sni_extension("example.com"));
+        let events = capture_events(|| {
+            let _ = extract_sni(&bytes);
+        });
+        assert_eq!(events.len(), 1, "expected one trace event per extract_sni");
+        let event = &events[0];
+        assert_eq!(event.target, "aegiuw_core::sni");
+        assert_eq!(event.level, "TRACE");
+        assert_eq!(
+            event.fields.get("outcome").map(String::as_str),
+            Some("cleartext")
+        );
+        assert_eq!(
+            event.fields.get("byte_count").map(String::as_str),
+            Some(bytes.len().to_string().as_str()),
+        );
+        // duration_us: u64 wall-clock microseconds — present, parses as integer.
+        let dur = event
+            .fields
+            .get("duration_us")
+            .expect("duration_us present");
+        assert!(dur.parse::<u64>().is_ok(), "duration_us not numeric: {dur}");
+    }
+
+    #[test]
+    fn t16_encrypted_emits_kind_encrypted() {
+        // ECH-bearing CH: outcome must be `encrypted`.
+        let mut exts = build_sni_extension("decoy.example.com");
+        exts.extend_from_slice(&build_extension(EXT_ENCRYPTED_CLIENT_HELLO, &[]));
+        let bytes = build_client_hello(&exts);
+        let events = capture_events(|| {
+            let _ = extract_sni(&bytes);
+        });
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].fields.get("outcome").map(String::as_str),
+            Some("encrypted"),
+        );
+    }
+
+    #[test]
+    fn t16_not_found_emits_kind_not_found() {
+        let bytes = build_client_hello(&[]); // empty extensions block
+        let events = capture_events(|| {
+            let _ = extract_sni(&bytes);
+        });
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].fields.get("outcome").map(String::as_str),
+            Some("not_found"),
+        );
+    }
+
+    #[test]
+    fn t16_malformed_emits_kind_malformed() {
+        let events = capture_events(|| {
+            let _ = extract_sni(&[0xff, 0xff, 0xff]);
+        });
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].fields.get("outcome").map(String::as_str),
+            Some("malformed"),
+        );
+        // byte_count reports the input length even on malformed inputs.
+        assert_eq!(
+            events[0].fields.get("byte_count").map(String::as_str),
+            Some("3"),
+        );
+    }
+
     // ── Trailing-bytes tolerance (C9, RFC 8446 §4) ───────────────────────────
 
     /// Local fixture: build a ClientHello whose handshake body has extra bytes

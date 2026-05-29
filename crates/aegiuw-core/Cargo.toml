@@ -60,6 +60,15 @@ sha2 = { version = "0.10", default-features = false }
 proptest = "1"
 # Benchmarks (SNI backlog P3). Run with `cargo bench -p aegiuw-core`.
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+# SNI backlog T16: capture tracing events in tests so the O1 trace-event
+# shape (target, outcome kind, byte_count, duration_us) is pinned against
+# silent regressions that would break downstream dashboards.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
+# Re-enable tracing's `std` feature for the test build so we can use
+# `tracing::subscriber::with_default` to install the capturing layer.
+# Production builds keep `default-features = false` (see [dependencies])
+# so the crate stays no_std-compatible per P6.
+tracing = { version = "0.1", features = ["std"] }
 
 [[bench]]
 name = "sni"

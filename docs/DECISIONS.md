@@ -252,6 +252,22 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **T16 (P3) Snapshot tests for the O1 trace event shape.** Done. 4 tests pin the wire shape of `extract_sni`'s structured trace event (target, level, outcome kind string, byte_count, duration_us) for each `SniOutcome` variant. A refactor that renamed `duration_us` to `duration_micros` or `outcome` to `verdict` would silently break every downstream dashboard built on the O2/O3 contracts — T16 catches that at test time.
+
+  **Implementation:** added a small custom `tracing_subscriber::Layer` (`CapturedEvents`) that records `tracing::Event`s into a `Mutex<Vec<CapturedEvent>>` with field-by-field visitor capture. Tests install the layer via `tracing::subscriber::with_default` for the scope of the `extract_sni` call, then drain the captured events for assertions.
+
+  **New dev-deps:**
+  - `tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }` — provides the `Layer` / `Registry` building blocks.
+  - `tracing = "0.1"` (with default `std` feature) in dev-dependencies, overriding the production `tracing = { default-features = false }`. Required because `tracing::subscriber::with_default` is std-gated. Production builds keep `no_std`-compat per P6; only the test build pulls in std.
+
+  **Tests:**
+  - `t16_cleartext_emits_structured_trace_event` — pins target = `"aegiuw_core::sni"`, level = `"TRACE"`, outcome = `"cleartext"`, byte_count matches input length, duration_us parses as u64.
+  - `t16_encrypted_emits_kind_encrypted` — outcome = `"encrypted"` for ECH-bearing CH.
+  - `t16_not_found_emits_kind_not_found` — outcome = `"not_found"` for empty-extensions CH.
+  - `t16_malformed_emits_kind_malformed` — outcome = `"malformed"` for garbage input; byte_count still reports input length on malformed inputs.
+
+  256 tests pass (was 252 — added 4). Clippy clean both feature sets.
+
 - **T10-T15 (P2) Labeled fixtures for existing-behaviour contracts.** Done as one commit because every item is a named alias for a contract already covered elsewhere — the fixtures exist so a test-plan reader can grep for `T10`/`T11`/… and land on an obvious entry.
   - **T10** — single `ServerName` entry with empty `host_name` → Malformed (RFC 6066 §3 `HostName<1..2^16-1>` non-empty by type construction). Already enforced by H2.
   - **T11** — `ServerNameList = [non_host_name, host_name]` → NotFound. The current parser bails on the unknown-name_type first entry without walking past it (failure-closed shape because we don't know the entry's wire structure). The "would have been usable" second `host_name` entry is silently skipped. New test documents this design choice with rationale.
