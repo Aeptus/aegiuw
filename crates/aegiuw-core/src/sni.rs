@@ -214,6 +214,20 @@ pub enum SniOutcome {
     Malformed,
 }
 
+impl SniOutcome {
+    /// Stable lowercase string for telemetry dimensions (SNI backlog O2).
+    /// Matches the `serde(rename_all = "snake_case")` shape so JSON-emitted
+    /// outcomes use the same label set.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            SniOutcome::Cleartext { .. } => "cleartext",
+            SniOutcome::Encrypted => "encrypted",
+            SniOutcome::NotFound => "not_found",
+            SniOutcome::Malformed => "malformed",
+        }
+    }
+}
+
 /// Parse the supplied bytes as a TLS ClientHello and report what was observed
 /// about the Server Name Indication.
 ///
@@ -255,7 +269,7 @@ pub fn extract_sni(bytes: &[u8]) -> SniOutcome {
     };
     tracing::trace!(
         target: "aegiuw_core::sni",
-        outcome = ?outcome,
+        outcome = outcome.kind(),
         byte_count = bytes.len(),
         duration_us = start.elapsed().as_micros() as u64,
         "extract_sni"
@@ -1102,6 +1116,22 @@ mod tests {
         ];
         let bytes = build_client_hello(&bad_extensions);
         assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    // ── Stable counter-dimension strings (O2) ────────────────────────────────
+
+    #[test]
+    fn sni_outcome_kind_strings_are_stable() {
+        // These string values are part of the public API surface (used as
+        // counter dimensions, log fields, dashboard labels). Renaming them
+        // is a breaking change for downstream telemetry — pin them here.
+        assert_eq!(
+            SniOutcome::Cleartext { host: "x".into() }.kind(),
+            "cleartext"
+        );
+        assert_eq!(SniOutcome::Encrypted.kind(), "encrypted");
+        assert_eq!(SniOutcome::NotFound.kind(), "not_found");
+        assert_eq!(SniOutcome::Malformed.kind(), "malformed");
     }
 
     // ── Allocation cap holds under drip-feed (S7) ────────────────────────────
