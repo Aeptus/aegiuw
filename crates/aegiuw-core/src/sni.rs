@@ -1269,8 +1269,11 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert_eq!(outcome, SniOutcome::NotFound);
+        // Budget 200 ms: a true quadratic blowup on N=4000 takes ~seconds even
+        // on fast hardware; the loose budget tolerates debug-build noise on
+        // a loaded machine without losing the linear-vs-quadratic signal.
         assert!(
-            elapsed.as_millis() < 50,
+            elapsed.as_millis() < 200,
             "parser took {elapsed:?} for {N}-extension max-size record",
         );
     }
@@ -1315,11 +1318,13 @@ mod tests {
 
         assert_eq!(outcome, SniOutcome::NotFound, "got {outcome:?} for N={N}");
 
-        // 500 ms is generous — covers debug builds with sanitizers + a slow
-        // CI machine. A quadratic loop on N=10_000 would take ~tens of
-        // seconds on the same hardware.
+        // 2000 ms is generous — covers debug builds with sanitizers, a slow
+        // CI machine, and momentary load on a developer laptop. A quadratic
+        // loop on N=10_000 would take ~tens of seconds on the same hardware,
+        // so this budget retains all the linear-vs-quadratic detection power
+        // while not flaking on wall-clock jitter.
         assert!(
-            elapsed.as_millis() < 500,
+            elapsed.as_millis() < 2_000,
             "parser took {elapsed:?} for {N} extensions — quadratic blowup?",
         );
     }
