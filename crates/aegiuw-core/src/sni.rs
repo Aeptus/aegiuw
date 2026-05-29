@@ -3773,6 +3773,117 @@ mod tests {
         assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
     }
 
+    // ── T10: SNI single entry with empty host_name ───────────────────────────
+
+    #[test]
+    fn t10_single_server_name_entry_with_empty_host_is_malformed() {
+        // One ServerName entry with name_type=host_name and host_name length = 0.
+        // RFC 6066 §3 `opaque HostName<1..2^16-1>` is non-empty by construction.
+        // Already enforced by H2 — T10 labels the fixture explicitly.
+        let bytes = build_client_hello(&build_sni_extension(""));
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    // ── T11: ServerNameList [non_host_name, host_name] ───────────────────────
+
+    #[test]
+    fn t11_server_name_list_first_entry_non_host_name_bails_with_not_found() {
+        // First entry is name_type=1 (undefined), so per current parser code
+        // (parse_server_name_extension returns Skip when first entry isn't
+        // host_name(0)), we don't continue scanning subsequent entries even
+        // if one of them is host_name. The CH still parses (no Malformed),
+        // but with no extracted host → NotFound.
+        //
+        // Note on this design choice: the RFC's wire structure has no
+        // length field per ServerName entry header beyond name_type +
+        // name_type-specific data. Without a registered structure for
+        // name_type != 0, we can't safely walk past it — so "bail to
+        // Skip" is the failure-closed shape, and the second host_name
+        // entry that *would* have been usable is ignored.
+        let mut list = Vec::new();
+        // First entry: name_type=1 (unknown), payload 4 bytes of zero.
+        list.push(1u8);
+        list.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        // Second entry: name_type=0 (host_name), host = "example.com".
+        list.push(0u8);
+        list.extend_from_slice(&(11u16).to_be_bytes());
+        list.extend_from_slice(b"example.com");
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&(list.len() as u16).to_be_bytes());
+        body.extend_from_slice(&list);
+
+        let ext = build_extension(EXT_SERVER_NAME, &body);
+        let bytes = build_client_hello(&ext);
+        // Parser bails on the unknown-name_type first entry → no host
+        // extracted; CH otherwise valid → NotFound.
+        assert_eq!(extract_sni(&bytes), SniOutcome::NotFound);
+    }
+
+    // ── T12: 253-byte hostname accepted ──────────────────────────────────────
+
+    #[test]
+    fn t12_hostname_at_253_byte_boundary_accepted() {
+        // RFC 1035 §2.3.4: 253-octet presentation form is the spec maximum.
+        // Already pinned by `accepts_hostname_at_253_byte_boundary` — T12
+        // labels the fixture explicitly.
+        let mut host = "a.".repeat(126);
+        host.push('a');
+        assert_eq!(host.len(), 253);
+        let bytes = build_client_hello(&build_sni_extension(&host));
+        assert_eq!(
+            extract_sni(&bytes),
+            SniOutcome::Cleartext { host: host.into() },
+        );
+    }
+
+    // ── T13: Mixed-case hostname passed through verbatim ─────────────────────
+
+    #[test]
+    fn t13_mixed_case_hostname_passed_through_verbatim() {
+        // DNS is case-insensitive (RFC 4343) but case normalisation is the
+        // upstream "normalize + enrich" step's job, not the parser's.
+        // The parser returns wire-case so telemetry sees what the sender sent.
+        // Already pinned by H6 contract tests — T13 labels the fixture.
+        let bytes = build_client_hello(&build_sni_extension("Example.COM"));
+        assert_eq!(
+            extract_sni(&bytes),
+            SniOutcome::Cleartext {
+                host: "Example.COM".into()
+            },
+        );
+    }
+
+    // ── T14: Trailing-dot hostname (H4 decision) ─────────────────────────────
+
+    #[test]
+    fn t14_trailing_dot_hostname_stripped_per_h4() {
+        // H4 decision: a single trailing dot is stripped so the upstream
+        // allow-cache and telemetry see one canonical form
+        // (`example.com.` and `example.com` resolve to the same name).
+        // Already pinned by H4-era tests — T14 labels the fixture explicitly.
+        let bytes = build_client_hello(&build_sni_extension("example.com."));
+        assert_eq!(
+            extract_sni(&bytes),
+            SniOutcome::Cleartext {
+                host: "example.com".into()
+            },
+        );
+    }
+
+    // ── T15: Numeric-IP hostname rejected (H1) ───────────────────────────────
+
+    #[test]
+    fn t15_numeric_ip_hostname_rejected_per_h1() {
+        // RFC 6066 §3: "Literal IPv4 and IPv6 addresses are not permitted
+        // in HostName." Already enforced by H1 — T15 labels the fixture.
+        let bytes = build_client_hello(&build_sni_extension("192.0.2.1"));
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+        // IPv6 too.
+        let bytes6 = build_client_hello(&build_sni_extension("2001:db8::1"));
+        assert_eq!(extract_sni(&bytes6), SniOutcome::Malformed);
+    }
+
     // ── Trailing-bytes tolerance (C9, RFC 8446 §4) ───────────────────────────
 
     /// Local fixture: build a ClientHello whose handshake body has extra bytes

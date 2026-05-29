@@ -252,6 +252,16 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **T10-T15 (P2) Labeled fixtures for existing-behaviour contracts.** Done as one commit because every item is a named alias for a contract already covered elsewhere — the fixtures exist so a test-plan reader can grep for `T10`/`T11`/… and land on an obvious entry.
+  - **T10** — single `ServerName` entry with empty `host_name` → Malformed (RFC 6066 §3 `HostName<1..2^16-1>` non-empty by type construction). Already enforced by H2.
+  - **T11** — `ServerNameList = [non_host_name, host_name]` → NotFound. The current parser bails on the unknown-name_type first entry without walking past it (failure-closed shape because we don't know the entry's wire structure). The "would have been usable" second `host_name` entry is silently skipped. New test documents this design choice with rationale.
+  - **T12** — 253-byte hostname accepted (RFC 1035 §2.3.4 max). Pinned by `accepts_hostname_at_253_byte_boundary`.
+  - **T13** — mixed-case hostname passed through verbatim. Pinned by H6 contract; T13 alias.
+  - **T14** — trailing-dot hostname stripped per H4. Pinned by H4 tests; T14 alias.
+  - **T15** — numeric IP literal (v4 + v6) rejected as Malformed (RFC 6066 §3 + H1).
+  
+  6 new tests; 252 total (was 246). Clippy clean both feature sets.
+
 - **T9 (P2) server_name extension with empty ServerNameList.** Done. 1 test pinning that the SNI extension body with `ServerNameList` u16 prefix = 0 returns Malformed. RFC 6066 §3 type construction (`<1..2^16-1>`) is non-empty; an empty list is a spec violation. Already enforced by C10 — T9 labels the fixture explicitly for the test plan. 246 tests.
 
 - **T8 (P2) Zero-length extensions block.** Done. 1 test pinning that a CH with `extensions_len = 0` parses as `SniOutcome::NotFound` (not Malformed). RFC 8446 §4.1.2's `Extension extensions<0..2^16-1>` permits zero entries by type construction. Metadata: `host = None`, `extension_order` empty, all Option fields None. 245 tests.
