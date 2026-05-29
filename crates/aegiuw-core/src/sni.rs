@@ -437,6 +437,17 @@ pub struct ClientHelloMetadata<'a> {
     /// for the C3/C4 duplicate-extension rejection) — no new parsing work.
     /// SNI backlog A12.
     pub extension_order: Vec<u16>,
+    /// The cipher_suites list from the ClientHello body (RFC 8446 §4.1.2),
+    /// in wire order. Always non-empty and even-length (those are
+    /// strictness checks our parser already enforces).
+    ///
+    /// Input for JA3 / JA4 fingerprinting (SNI backlog F1 / F2). The
+    /// individual codepoints follow the IANA TLS Cipher Suites registry
+    /// (e.g. `0x1301` = TLS_AES_128_GCM_SHA256). GREASE codepoints
+    /// (RFC 8701) appear here verbatim; consumers that need a
+    /// fingerprint-grade view should filter them via
+    /// [`is_grease_codepoint`](crate::fingerprint::is_grease_codepoint).
+    pub cipher_suites: Vec<u16>,
 }
 
 /// Classified ALPN protocol identifier (SNI backlog A2).
@@ -1190,10 +1201,16 @@ pub fn parse_handshake_message_full(handshake: &[u8]) -> Option<ClientHelloMetad
     // each suite is exactly 2 bytes. An empty list or an odd byte count is a
     // spec violation (and a strong signal of a malformed/probe handshake).
     // SNI backlog C7.
-    let cipher_suites = c.read_u16_prefixed()?;
-    if cipher_suites.is_empty() || cipher_suites.len() % 2 != 0 {
+    let cipher_suites_bytes = c.read_u16_prefixed()?;
+    if cipher_suites_bytes.is_empty() || cipher_suites_bytes.len() % 2 != 0 {
         return None;
     }
+    // F1: materialise the cipher_suites list as Vec<u16> for downstream
+    // fingerprinting (the parser already validated the wire byte length).
+    let cipher_suites: Vec<u16> = cipher_suites_bytes
+        .chunks_exact(2)
+        .filter_map(|pair| <[u8; 2]>::try_from(pair).ok().map(u16::from_be_bytes))
+        .collect();
 
     // RFC 8446 §4.1.2: a TLS 1.3 ClientHello MUST list a single null
     // compression method. Older TLS allowed deflate too, but the CRIME
@@ -1232,6 +1249,7 @@ pub fn parse_handshake_message_full(handshake: &[u8]) -> Option<ClientHelloMetad
         supported_groups: None,
         ec_point_formats: None,
         extension_order: Vec::new(),
+        cipher_suites,
     };
     // P1: host borrows from the input `handshake` slice; no allocation.
     let mut sni_host: Option<&str> = None;
@@ -1426,6 +1444,7 @@ pub fn parse_client_hello_full(bytes: &[u8]) -> Option<ClientHelloMetadata<'_>> 
                 supported_groups: borrowed.supported_groups,
                 ec_point_formats: borrowed.ec_point_formats,
                 extension_order: borrowed.extension_order,
+                cipher_suites: borrowed.cipher_suites,
             })
         }
     }

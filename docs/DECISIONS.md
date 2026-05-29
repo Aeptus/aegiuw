@@ -252,6 +252,23 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **F1 (P3) JA3 TLS fingerprint.** Done. New `crates/aegiuw-core/src/fingerprint.rs` module with:
+  - `pub fn ja3(meta: &ClientHelloMetadata) -> Ja3` — Althouse/Atkinson/Atkins 2017 algorithm.
+  - `pub struct Ja3 { raw, md5 }` — comma-separated input string + lowercase hex MD5.
+  - `pub const fn is_grease_codepoint(value: u16) -> bool` — RFC 8701 §3 GREASE detector (shared by F1/F2/F4).
+  - New field `cipher_suites: Vec<u16>` on `ClientHelloMetadata`. The parser already validated the cipher list (non-empty, even length); F1 materialises it as `Vec<u16>` so JA3 can consume it. Parser change uses `chunks_exact(2)` + `from_be_bytes` — no panicking indexes (S5 lint clean).
+  - New dependency: `md-5 = "0.10"` (RustCrypto, `default-features = false` keeps it no_std-friendly per P6).
+
+  **Algorithm notes pinned in code:**
+  - First field is `legacy_version` (we enforce `0x0303` = `771`), so every TLS 1.3 connection through our parser gets `771,…`. JA3's lost discriminatory power for 1.3 is exactly why F2 (JA4) exists.
+  - GREASE filtered from cipher / extension / supported_groups lists. `ec_point_formats` is `u8` so no GREASE convention applies.
+  - Lists are joined in **wire order**, not sorted. JA4 sorts; JA3 deliberately doesn't. Pinned by `ja3_preserves_wire_order_within_each_field`.
+  - Host and ALPN values do *not* enter the fingerprint — only the extension *type code* shows up in the third field. Pinned by `ja3_with_host_and_alpn_doesnt_affect_string`.
+
+  **MD5 verification approach:** each reference test's expected MD5 was computed externally (`printf '%s' '<raw>' | md5sum`) and the command is in the comment so future PRs can reproduce.
+
+  **187 tests pass** (was 178 — added 8 unit + 1 doctest on `is_grease_codepoint`). Clippy clean both `--all-targets` (std) and `--no-default-features --lib` (no_std).
+
 - **A12 (P3) Expose `extension_order` (high-fidelity fingerprinting input).** Done. Added `pub extension_order: Vec<u16>` on `ClientHelloMetadata` — every extension type seen, in the order they appeared on the wire. This is the raw input JA3/JA4-style fingerprints are largely built from; downstream code can hash it however they want without us baking an algorithm in.
 
   **Zero new parser code:** the parser already builds this Vec internally as `seen_ext_types` for the C3/C4 duplicate-extension rejection (RFC 8446 §4.2). A12 just renames that local variable to `meta.extension_order` so the same single write serves both the internal dup check and the public surface. The Cow promotion path picks up the field through normal `borrowed.extension_order` flow (Vec<u16> is Copy-friendly, no lifetime concerns).

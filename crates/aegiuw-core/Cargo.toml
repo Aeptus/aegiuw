@@ -44,6 +44,10 @@ tracing = { version = "0.1", default-features = false }
 # `parse_server_name_extension` to find dot positions for the label-length
 # check. `default-features = false` keeps it no_std-compatible.
 memchr = { version = "2", default-features = false }
+# SNI backlog F1: JA3 fingerprint uses MD5 (per the original 2017 paper).
+# RustCrypto's no_std-friendly md-5; `default-features = false` keeps the
+# crate compatible with our P6 no_std build.
+md-5 = { version = "0.10", default-features = false }
 
 [dev-dependencies]
 # Property testing for the SNI parser (SNI backlog S2). Complements the
