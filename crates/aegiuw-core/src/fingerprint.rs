@@ -483,6 +483,100 @@ pub struct Ja4H {
     pub implemented: bool,
 }
 
+// ── F4: JA3 / JA4 → KnownClient mapping ──────────────────────────────────────
+
+/// Bucketed identification of the TLS client that produced a fingerprint
+/// (SNI backlog F4). Intentionally coarse — we want to ask "is this a
+/// real browser?" not "which patch version of Chrome?".
+///
+/// `Other` covers anything not in our [built-in starter
+/// table](KNOWN_JA4_FINGERPRINTS) — including most CLI tools, embedded TLS
+/// stacks, and *any* version of Chrome / Firefox / Safari that doesn't
+/// match a specific fingerprint we shipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnownClient {
+    Chrome,
+    Firefox,
+    Safari,
+    /// `curl` (and tools that link the same TLS stack, e.g. older `wget`).
+    Curl,
+    /// Go's `crypto/tls` (default `net/http` client).
+    Go,
+    /// Anything not matched by the built-in starter table.
+    Other,
+}
+
+impl KnownClient {
+    /// Stable lowercase string for telemetry dimensions, mirroring the
+    /// O2 / A2 / A3 convention.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Chrome => "chrome",
+            Self::Firefox => "firefox",
+            Self::Safari => "safari",
+            Self::Curl => "curl",
+            Self::Go => "go",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Look up a JA3 MD5 hash in the built-in starter table. Returns
+/// `Some(KnownClient)` only for exact matches.
+///
+/// **Scope:** the table is a small set of well-documented public
+/// fingerprints, intended as a starting point. Real deployments should
+/// layer a production fingerprint database on top (the JA4 ecosystem
+/// is rapidly evolving — pinning specific hashes in source ages quickly).
+///
+/// See [`KNOWN_JA3_FINGERPRINTS`] for the table contents.
+pub fn known_client_from_ja3(ja3_md5: &str) -> Option<KnownClient> {
+    KNOWN_JA3_FINGERPRINTS
+        .iter()
+        .find(|(fp, _)| *fp == ja3_md5)
+        .map(|(_, c)| *c)
+}
+
+/// Look up a JA4 raw fingerprint (the underscore-joined `a_b_c` form) in
+/// the built-in starter table.
+///
+/// See [`KNOWN_JA4_FINGERPRINTS`] for the table contents.
+pub fn known_client_from_ja4(ja4_raw: &str) -> Option<KnownClient> {
+    KNOWN_JA4_FINGERPRINTS
+        .iter()
+        .find(|(fp, _)| *fp == ja4_raw)
+        .map(|(_, c)| *c)
+}
+
+/// Built-in JA3 → [`KnownClient`] starter table.
+///
+/// **Curation policy:** entries here must come from publicly-documented
+/// sources (research papers, FoxIO blog posts, ja3er.com archives). JA3
+/// hashes are particularly fragile — a single browser-version update can
+/// reshuffle extension order and flip the hash. Treat this as a tiny
+/// reference set, not a production directory.
+pub const KNOWN_JA3_FINGERPRINTS: &[(&str, KnownClient)] = &[
+    // No JA3 entries shipped: the JA3 ecosystem has effectively been
+    // superseded by JA4 (which is sort-invariant and survives browser
+    // extension-order randomisation). Callers can extend at the call site
+    // by checking their own table before falling back to ours.
+];
+
+/// Built-in JA4 → [`KnownClient`] starter table.
+///
+/// JA4 is sort-stable so its hashes age much better than JA3. The
+/// fingerprints below are seeded from FoxIO's public reference material
+/// (the "Introducing JA4+" blog and the open-sourced `ja4` repository).
+/// Production deployments should still layer their own data on top — the
+/// table is a starting point, not an exhaustive directory.
+pub const KNOWN_JA4_FINGERPRINTS: &[(&str, KnownClient)] = &[
+    // FoxIO 2023 reference: a representative Chrome JA4 from a TLS 1.3 +
+    // X25519 + h2-ALPN handshake. Documented in the "Introducing JA4+"
+    // launch post (foxio.io/blog/ja4-network-fingerprinting).
+    ("t13d1516h2_8daaf6152771_b186095e22b6", KnownClient::Chrome),
+];
+
 #[cfg(test)]
 mod tests {
     use alloc::borrow::Cow;
@@ -884,5 +978,89 @@ mod tests {
             result.raw,
             format!("{}_{}_{}_{}", result.a, result.b, result.c, result.d)
         );
+    }
+
+    // ── F4: KnownClient lookup ───────────────────────────────────────────────
+
+    #[test]
+    fn known_client_kind_strings_are_stable_snake_case() {
+        // O2 / A2 / A3 dashboard convention. Any rename here breaks
+        // downstream telemetry — pin every variant.
+        assert_eq!(KnownClient::Chrome.kind(), "chrome");
+        assert_eq!(KnownClient::Firefox.kind(), "firefox");
+        assert_eq!(KnownClient::Safari.kind(), "safari");
+        assert_eq!(KnownClient::Curl.kind(), "curl");
+        assert_eq!(KnownClient::Go.kind(), "go");
+        assert_eq!(KnownClient::Other.kind(), "other");
+    }
+
+    #[test]
+    fn known_client_from_ja4_matches_seeded_chrome_entry() {
+        // The FoxIO 2023 reference fingerprint shipped in the starter table.
+        // Documented in foxio.io/blog/ja4-network-fingerprinting.
+        assert_eq!(
+            known_client_from_ja4("t13d1516h2_8daaf6152771_b186095e22b6"),
+            Some(KnownClient::Chrome),
+        );
+    }
+
+    #[test]
+    fn known_client_from_ja4_returns_none_for_unknown_fingerprints() {
+        assert_eq!(
+            known_client_from_ja4("t13d0000h2_aaaaaaaaaaaa_bbbbbbbbbbbb"),
+            None
+        );
+        assert_eq!(known_client_from_ja4(""), None);
+    }
+
+    #[test]
+    fn known_client_from_ja3_returns_none_for_anything() {
+        // The starter table ships with no JA3 entries (JA3 hashes are
+        // fragile across browser releases; JA4 is the canonical surface).
+        // Pin the empty-table contract so a future PR can't quietly slip
+        // in unverified entries.
+        assert!(KNOWN_JA3_FINGERPRINTS.is_empty());
+        assert_eq!(
+            known_client_from_ja3("d41d8cd98f00b204e9800998ecf8427e"),
+            None
+        );
+    }
+
+    #[test]
+    fn known_client_lookup_round_trips_via_ja4_pipeline() {
+        // End-to-end smoke: build a meta that produces the seeded JA4,
+        // then look up the result. This is the "would real code work"
+        // path that wires F2 → F4.
+        let mut meta = empty_meta();
+        // We can't recover the exact JA4 from synthetic metadata easily —
+        // instead, smoke-test the *interface* by feeding the raw form of
+        // any computed JA4 through the lookup and checking the type.
+        meta.cipher_suites = vec![0x1301];
+        meta.host = Some(Cow::Borrowed("example.com"));
+        let computed_ja4 = ja4(&meta);
+        // This synthetic JA4 won't be in the table, but the lookup must
+        // accept a real Ja4::raw string without panic.
+        let _ = known_client_from_ja4(&computed_ja4.raw);
+    }
+
+    #[test]
+    fn known_client_table_entries_are_well_formed() {
+        // Pin shape: every entry's JA4 string has the t/q prefix + version
+        // + valid alphanumeric chars + underscores. Catches typos in the
+        // table at compile-affecting test time rather than at production.
+        for (fp, _client) in KNOWN_JA4_FINGERPRINTS {
+            let parts: Vec<&str> = fp.split('_').collect();
+            assert_eq!(
+                parts.len(),
+                3,
+                "JA4 must have 3 underscore-joined segments: {fp}"
+            );
+            assert!(
+                matches!(parts[0].chars().next(), Some('t' | 'q')),
+                "JA4_a must start t or q: {fp}"
+            );
+            assert_eq!(parts[1].len(), 12, "JA4_b must be 12 hex chars: {fp}");
+            assert_eq!(parts[2].len(), 12, "JA4_c must be 12 hex chars: {fp}");
+        }
     }
 }

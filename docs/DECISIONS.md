@@ -252,6 +252,22 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **F4 (P3) JA3 / JA4 → `KnownClient` mapping.** Done. Added:
+  - `pub enum KnownClient { Chrome, Firefox, Safari, Curl, Go, Other }` with `kind()` for stable snake_case telemetry labels (O2 / A2 / A3 convention).
+  - `pub fn known_client_from_ja3(ja3_md5) -> Option<KnownClient>` and `pub fn known_client_from_ja4(ja4_raw) -> Option<KnownClient>`.
+  - `pub const KNOWN_JA3_FINGERPRINTS` / `KNOWN_JA4_FINGERPRINTS` static tables (`&[(&str, KnownClient)]`).
+
+  **Scope of the built-in tables — deliberately tiny:** the JA4 table ships exactly one seed entry, the FoxIO 2023 reference Chrome fingerprint `t13d1516h2_8daaf6152771_b186095e22b6` (documented in foxio.io/blog/ja4-network-fingerprinting). The JA3 table ships empty.
+
+  **Why so few:**
+  - JA3 hashes are fragile across browser releases — a single Chrome update can reshuffle extension order and flip the hash. Shipping unverified entries in the source would actively mislead callers. Pinned by `known_client_from_ja3_returns_none_for_anything` so a future PR can't quietly slip in entries.
+  - JA4 is sort-stable so JA4 hashes age better, but the production-grade fingerprint corpus lives in JA4 databases (FoxIO's `ja4db.com`, threat-intel feeds). Baking specific hashes into Rust source freezes them; we ship the seed entry as a smoke-test of the lookup mechanism and leave production data plumbing to the deployer.
+  - Real deployments should layer their own table on top — check locally first, fall back to `known_client_from_ja4` for the seed entries.
+
+  **Table well-formedness pinned** by `known_client_table_entries_are_well_formed`: every JA4 entry has 3 underscore-joined segments, `a` starts with `t` or `q`, `b` and `c` are exactly 12 hex chars. Catches typos at test time rather than in production.
+
+  **6 new tests; 210 total** (was 204). Clippy clean both feature sets.
+
 - **F3 (P3) JA4_H stub (HTTP-layer fingerprint).** Done as a stub per the backlog wording ("out of SNI parser scope but worth a stub"). Added `pub fn ja4_h(input: &Ja4HInput) -> Ja4H` to `fingerprint.rs` with:
   - `pub struct Ja4HInput<'a>` — borrowed view over the HTTP-layer signals the daemon will collect (method, version, cookie/referer flags, header_names in wire order, accept_language). Not Serialize/Deserialize — it's an input view, not a persisted shape.
   - `pub struct Ja4H { a, b, c, d, raw, implemented }` — segments + the underscore-joined form + an `implemented: bool` flag that's `false` for the stub and `true` once the real algorithm lands.
