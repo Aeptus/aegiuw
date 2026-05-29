@@ -252,6 +252,14 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **A7 (P2) Expose `compress_certificate` presence (RFC 8879).** Done. Added `pub const EXT_COMPRESS_CERTIFICATE: u16 = 0x001b` and `pub compress_certificate_present: bool` on `ClientHelloMetadata`. The client advertises support for one or more certificate-compression algorithms (zlib, brotli, zstd).
+
+  **Why this is a fingerprint signal:** modern browsers (Chrome ≥ 89, Firefox ≥ 90) and modern TLS libraries advertise `compress_certificate`; minimal clients (e.g. `curl --resolve`, embedded TLS stacks, single-purpose scanners) often don't. The presence flag is a low-cost dimension of "is this a mainstream browser-class client?" without us having to parse JA3/JA4-style fingerprints.
+
+  **Why presence only:** the body is `u8`-prefixed list of `u16` algorithm IDs (1 = zlib, 2 = brotli, 3 = zstd). The per-algorithm breakdown could be exposed later as A7+ if a higher-resolution fingerprint becomes useful, but presence already gives Layer 2 the 80/20 signal — pinning that scope choice in DECISIONS so a future PR doesn't quietly expand the surface.
+
+  **Tests:** 3 new — present with [brotli, zstd], absent, present with [zlib] (minimal valid body). 159 tests pass (was 156). Clippy clean both feature sets.
+
 - **A6 (P2) Expose `early_data` presence (0-RTT in flight).** Done. Added `pub const EXT_EARLY_DATA: u16 = 0x002a` (RFC 8446 §4.2.10) and `pub early_data_present: bool` on `ClientHelloMetadata`. Signals that the client is sending 0-RTT data alongside the ClientHello, encrypted under the PSK it's offering for resumption.
 
   **Why Layer 2 wants this signal:** 0-RTT has documented forward-secrecy and replay-protection trade-offs (RFC 8446 §8). Policy may want to flag 0-RTT-bearing connections — e.g. require user confirmation for endpoints where replay risk is unacceptable.

@@ -172,6 +172,13 @@ pub const EXT_SUPPORTED_VERSIONS: u16 = 0x002b;
 /// check) that `pre_shared_key` is also present. SNI backlog A6.
 pub const EXT_EARLY_DATA: u16 = 0x002a;
 
+/// Extension type for `compress_certificate` (RFC 8879 §3). Signals the
+/// client supports one or more certificate-compression algorithms (zlib,
+/// brotli, zstd). Body is a `u8`-prefixed list of `u16` algorithm IDs; we
+/// only expose presence — the per-algorithm fingerprint can be added later
+/// if needed. SNI backlog A7.
+pub const EXT_COMPRESS_CERTIFICATE: u16 = 0x001b;
+
 /// Extension type for `key_share` (RFC 8446 §4.2.8). We parse the NamedGroup
 /// IDs from the client_shares list (skipping the key_exchange bytes — we
 /// don't need the actual public keys) so Layer 2 can fingerprint
@@ -350,6 +357,16 @@ pub struct ClientHelloMetadata<'a> {
     ///
     /// [`psk_present`]: ClientHelloMetadata::psk_present
     pub early_data_present: bool,
+    /// `true` if a `compress_certificate` extension (RFC 8879) was present.
+    /// The client advertises support for certificate compression (zlib /
+    /// brotli / zstd). Useful as a fingerprint dimension — modern browsers
+    /// and TLS libraries advertise this; minimal clients (curl --resolve,
+    /// embedded TLS stacks, single-purpose scanners) often don't.
+    ///
+    /// We deliberately expose presence only; the per-algorithm list can be
+    /// added later if a higher-resolution fingerprint becomes useful.
+    /// SNI backlog A7.
+    pub compress_certificate_present: bool,
 }
 
 /// Classified ALPN protocol identifier (SNI backlog A2).
@@ -1139,6 +1156,7 @@ pub fn parse_handshake_message_full(handshake: &[u8]) -> Option<ClientHelloMetad
         key_share_groups: None,
         psk_present: false,
         early_data_present: false,
+        compress_certificate_present: false,
     };
     // P1: host borrows from the input `handshake` slice; no allocation.
     let mut sni_host: Option<&str> = None;
@@ -1212,6 +1230,9 @@ pub fn parse_handshake_message_full(handshake: &[u8]) -> Option<ClientHelloMetad
             }
             EXT_EARLY_DATA => {
                 meta.early_data_present = true;
+            }
+            EXT_COMPRESS_CERTIFICATE => {
+                meta.compress_certificate_present = true;
             }
             _ => {}
         }
@@ -1308,6 +1329,7 @@ pub fn parse_client_hello_full(bytes: &[u8]) -> Option<ClientHelloMetadata<'_>> 
                 key_share_groups: borrowed.key_share_groups,
                 psk_present: borrowed.psk_present,
                 early_data_present: borrowed.early_data_present,
+                compress_certificate_present: borrowed.compress_certificate_present,
             })
         }
     }
@@ -3629,6 +3651,50 @@ mod tests {
         let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
         assert!(meta.early_data_present);
         assert!(!meta.psk_present, "PSK absent => psk_present stays false");
+    }
+
+    // ── A7: compress_certificate presence (RFC 8879) ─────────────────────────
+
+    /// Build a `compress_certificate` extension body advertising the given
+    /// algorithm IDs (RFC 8879 §3: u8-prefixed list of u16 algorithm codes).
+    fn build_compress_certificate_extension(algorithms: &[u16]) -> Vec<u8> {
+        let mut list: Vec<u8> = Vec::new();
+        for a in algorithms {
+            list.extend_from_slice(&a.to_be_bytes());
+        }
+        let mut body = Vec::new();
+        body.push(list.len() as u8);
+        body.extend_from_slice(&list);
+        build_extension(EXT_COMPRESS_CERTIFICATE, &body)
+    }
+
+    #[test]
+    fn compress_certificate_present_true_when_extension_seen() {
+        let mut exts = build_sni_extension("example.com");
+        // 1 = zlib, 2 = brotli, 3 = zstd — RFC 8879 §7.2.
+        exts.extend_from_slice(&build_compress_certificate_extension(&[2, 3]));
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(meta.compress_certificate_present);
+        assert_eq!(meta.host.as_deref(), Some("example.com"));
+    }
+
+    #[test]
+    fn compress_certificate_present_false_when_extension_absent() {
+        let bytes = build_client_hello(&build_sni_extension("example.com"));
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(!meta.compress_certificate_present);
+    }
+
+    #[test]
+    fn compress_certificate_present_with_minimal_body() {
+        // Single-algorithm advertisement (zlib only) — the smallest valid
+        // body shape. Presence flag must still fire.
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&build_compress_certificate_extension(&[1]));
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(meta.compress_certificate_present);
     }
 
     #[test]
