@@ -39,6 +39,11 @@ serde = { version = "1", default-features = false, features = ["derive", "alloc"
 # daemon's Layer-1 subscriber pick them up without coupling the parser to
 # any specific exporter. `default-features = false` keeps it no_std-compatible.
 tracing = { version = "0.1", default-features = false }
+# SNI backlog P5: byte-search primitive with SIMD inside (no unsafe for the
+# caller, per-target dispatch handled by the crate). Used in
+# `parse_server_name_extension` to find dot positions for the label-length
+# check. `default-features = false` keeps it no_std-compatible.
+memchr = { version = "2", default-features = false }
 
 [dev-dependencies]
 # Property testing for the SNI parser (SNI backlog S2). Complements the

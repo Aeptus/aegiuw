@@ -305,11 +305,24 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
   Rationale: the Worker (`aegiuw-router`) currently runs as TypeScript-on-V8, but a future migration to Rust-compiled-to-WASM would benefit from a no_std core (smaller bundles, faster cold-start, no need to bring in std's panic-handler or allocator wrappers). Building this support *now* — while the parser is small and well-tested — is much cheaper than retrofitting later. The 112-test suite passes under both feature sets; clippy is clean for both `--all-targets` (std) and `--no-default-features --lib` (no_std).
 
-- **P5 (P3) SIMD evaluation.** Deferred with rationale. The SNI backlog flagged SIMD as "almost certainly overkill" and P4's measurements confirm it: a single core sustains ~9.7M parses/sec and our worst-case path is ~145 ns. SIMD would target three hot loops in the parser:
-  - the `read_u16`/`read_u24` big-endian decodes,
-  - the host-bytes UTF-8 validation (`std::str::from_utf8`), and
-  - the extension-type duplicate-detection sweep.
-  All three are already memory-bandwidth bound or trivially small (host bytes ≤ 255). Vectorising them would shave at best a handful of nanoseconds while adding: (a) `unsafe` arch-intrinsics that violate the crate-level `forbid(unsafe_code)` lint, (b) per-target dispatch (`x86_64` SSE2/AVX2, `aarch64` NEON, scalar fallback for WASM) tripling the test matrix, and (c) a portability hit for the no_std/WASM-on-Worker path that P6 enables. **Revisit only** if a profile traces aegiuw-daemon spending > 1% of CPU on SNI parsing — current projection (P4) is << 0.001%, so this is at least 1000× away from being a real concern.
+- **P5 (P3) SIMD / `memchr` for the parser's byte scans.** ~~Deferred~~ **Done, scoped to `memchr` only.** The original deferral rejected hand-written SIMD intrinsics (correctly — they'd violate `forbid(unsafe_code)`, triple the test matrix, and conflict with P6's no_std/WASM path). The `memchr` crate sidesteps all three concerns: no `unsafe` for the caller, internal per-target dispatch (SSE2/AVX2/NEON with scalar fallback), `default-features = false` keeps it no_std-compatible.
+
+  Implementation: swapped `host_str.split('.').any(|label| label.len() > MAX_LABEL_LEN)` for a `memchr::memchr_iter(b'.', host_bytes)` walk that tracks `prev` and checks `dot - prev > 63` between each pair (plus the trailing segment). Single 12-line block in `parse_server_name_extension`. No API change, no test churn, behaviour identical (verified by all 112 tests passing unchanged).
+
+  **A/B measured impact (criterion `--quick`, Apple Silicon, release):**
+  | Bench | Old `split('.')` | New `memchr_iter` | Δ |
+  |---|---|---|---|
+  | `extract_sni` typical (1 dot) | 51 ns | 51 ns | 0% |
+  | `extract_sni` 253-byte host, 127 labels | 337 ns | **276 ns** | **−18%** |
+
+  Typical traffic sees no measurable delta because example.com has one dot — memchr's setup overhead and the scalar fallback both finish in ~1 ns. Long, deep-subdomain hostnames (`a1.a2.a3.…` style — the kind of input attackers use to test length-handling code paths) get the SIMD win.
+
+  Wider SIMD opportunities not pursued (and why):
+  - `read_u16`/`read_u24` decode: already optimal; LLVM lowers to a single `lwbr`-style instruction.
+  - `core::str::from_utf8`: already SIMD-optimized in std/alloc itself.
+  - Extension dup-detection (`seen_ext_types: Vec<u16>::contains`): bounded by the realistic ~15–20 extensions per CH; constant factors beat any algorithmic improvement at that N.
+
+  Deferral reversal lesson: the right framing was "should we add hand-written SIMD?" (no) vs. "should we use a curated SIMD-backed primitive?" (yes — 18% with no downsides on the worst-case hot path).
 
 - **P4 (P2) Cost breakdown — qualitative + quantitative.** Done. With P3's criterion numbers in hand we can now characterise SNI parsing cost concretely:
 

@@ -844,8 +844,24 @@ fn parse_server_name_extension(data: &[u8]) -> ServerNameOutcome<'_> {
     if host_str.len() > MAX_HOSTNAME_LEN {
         return ServerNameOutcome::Malformed;
     }
-    if host_str.split('.').any(|label| label.len() > MAX_LABEL_LEN) {
-        return ServerNameOutcome::Malformed;
+    // P5: walk the dot positions with `memchr::memchr_iter` (SIMD-accelerated
+    // inside the crate, no `unsafe` for us) instead of `split('.').any(...)`.
+    // The previous form built an iterator chain that the optimiser had to
+    // unwrap; this form drops straight into a byte-search primitive and is
+    // measurably faster on hostnames that have many short labels (the
+    // 10 000-extension fuzz test and any FQDN with a deep subdomain).
+    {
+        let bytes = host_str.as_bytes();
+        let mut prev: usize = 0;
+        for dot in memchr::memchr_iter(b'.', bytes) {
+            if dot - prev > MAX_LABEL_LEN {
+                return ServerNameOutcome::Malformed;
+            }
+            prev = dot + 1;
+        }
+        if bytes.len() - prev > MAX_LABEL_LEN {
+            return ServerNameOutcome::Malformed;
+        }
     }
 
     // RFC 6066 §3: "Literal IPv4 and IPv6 addresses are not permitted in

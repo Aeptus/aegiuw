@@ -76,6 +76,21 @@ fn fragmented_client_hello() -> Vec<u8> {
     out
 }
 
+fn many_labels_hostname() -> String {
+    // 126 single-char labels + "a" = 253 bytes total. Same shape as
+    // `accepts_hostname_at_253_byte_boundary` test fixture. P5 dot-search
+    // does its work on this kind of input.
+    let mut host = "a.".repeat(126);
+    host.push('a');
+    host
+}
+
+fn many_labels_client_hello() -> Vec<u8> {
+    let host = many_labels_hostname();
+    let ext = build_sni_extension(&host);
+    wrap_record(&build_handshake_message(&ext))
+}
+
 fn benches(c: &mut Criterion) {
     let typical = typical_client_hello();
     c.bench_function("extract_sni / typical single-record CH with SNI", |b| {
@@ -86,6 +101,15 @@ fn benches(c: &mut Criterion) {
     c.bench_function("extract_sni / two-record fragmented CH with SNI", |b| {
         b.iter(|| extract_sni(black_box(&fragmented)))
     });
+
+    // P5: this fixture has 127 labels (each 1 byte). The dot-search path is
+    // the one memchr accelerates; flat numbers here say "memchr is no worse";
+    // a win here is the win.
+    let many_labels = many_labels_client_hello();
+    c.bench_function(
+        "extract_sni / 253-byte host, 127 labels (P5 hot path)",
+        |b| b.iter(|| extract_sni(black_box(&many_labels))),
+    );
 
     c.bench_function("reassemble_handshake / typical single-record", |b| {
         b.iter(|| reassemble_handshake(black_box(&typical)))
