@@ -4053,6 +4053,300 @@ mod tests {
         );
     }
 
+    // ── T17: Length-prefix overflow tests (per-? site coverage) ──────────────
+    //
+    // T6 (truncation sweep) proves the parser never panics on any prefix.
+    // T17 is a category-coverage label for each *kind* of length-prefix
+    // overrun in the parser, so a test-plan reader can grep for the
+    // specific structural failure point. Each test constructs an input
+    // that targets one Cursor read site and asserts Malformed.
+    //
+    // Categories (mapping to specific `?` sites in the parser):
+
+    // 1. Record-header reads: content_type, legacy_record_version, fragment_len.
+    #[test]
+    fn t17_truncated_record_header_content_type_only() {
+        // 1 byte: content_type only, no version or length.
+        assert_eq!(
+            extract_sni(&[CONTENT_TYPE_HANDSHAKE]),
+            SniOutcome::Malformed
+        );
+    }
+
+    #[test]
+    fn t17_truncated_record_header_no_fragment_len() {
+        // 3 bytes: content_type + half of version.
+        assert_eq!(
+            extract_sni(&[CONTENT_TYPE_HANDSHAKE, 0x03, 0x01]),
+            SniOutcome::Malformed,
+        );
+    }
+
+    // 2. Fragment payload shorter than the claimed fragment_len.
+    #[test]
+    fn t17_fragment_len_overruns_input() {
+        // Record header claims 100 fragment bytes; only 4 follow.
+        let mut input = vec![CONTENT_TYPE_HANDSHAKE, 0x03, 0x01];
+        input.extend_from_slice(&100u16.to_be_bytes());
+        input.extend_from_slice(&[0x01, 0x02, 0x03, 0x04]);
+        assert_eq!(extract_sni(&input), SniOutcome::Malformed);
+    }
+
+    // 3. Handshake header read overruns: handshake_type, u24 body_len.
+    #[test]
+    fn t17_truncated_handshake_header_no_body_length() {
+        // Record carries a single handshake_type byte but no u24 length.
+        let handshake = vec![HANDSHAKE_TYPE_CLIENT_HELLO];
+        let record = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        assert_eq!(extract_sni(&record), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn t17_truncated_handshake_body_length_overruns_payload() {
+        // body_len = 0xFFFFFE but only a few bytes follow.
+        let handshake = vec![HANDSHAKE_TYPE_CLIENT_HELLO, 0xFF, 0xFF, 0xFE, 0x01];
+        let record = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        assert_eq!(extract_sni(&record), SniOutcome::Malformed);
+    }
+
+    // 4. ClientHello body reads: legacy_version, random, session_id prefix +
+    //    bytes, cipher_suites prefix + bytes, compression prefix + bytes,
+    //    extensions prefix + bytes.
+    #[test]
+    fn t17_truncated_legacy_version() {
+        // Handshake header complete; body has 1 byte (half of legacy_version).
+        let mut handshake = vec![HANDSHAKE_TYPE_CLIENT_HELLO, 0x00, 0x00, 0x01, 0x03];
+        // body_len is 1, fragment carries 1 byte. parse_handshake_message_full
+        // needs to read 2 bytes for legacy_version → Malformed.
+        let _ = &mut handshake; // silence "unused mut"
+        let record = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        assert_eq!(extract_sni(&record), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn t17_truncated_random_field() {
+        // legacy_version present; random[32] truncated.
+        let mut handshake = Vec::new();
+        handshake.push(HANDSHAKE_TYPE_CLIENT_HELLO);
+        handshake.extend_from_slice(&[0x00, 0x00, 0x05]); // body_len = 5
+        handshake.extend_from_slice(&[0x03, 0x03]); // legacy_version
+        handshake.extend_from_slice(&[0xAA, 0xBB, 0xCC]); // only 3 bytes of 32 needed
+        let record = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        assert_eq!(extract_sni(&record), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn t17_session_id_prefix_overruns() {
+        // session_id_len = 200 but only 5 bytes follow.
+        let mut handshake = Vec::new();
+        handshake.push(HANDSHAKE_TYPE_CLIENT_HELLO);
+        handshake.extend_from_slice(&[0x00, 0x00, 40]); // body_len placeholder
+        handshake.extend_from_slice(&[0x03, 0x03]); // legacy_version
+        handshake.extend_from_slice(&[0xAA; 32]); // random
+        handshake.push(200u8); // session_id_len > remaining
+        handshake.extend_from_slice(&[0xCC; 5]);
+        let record = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        assert_eq!(extract_sni(&record), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn t17_cipher_suites_prefix_overruns() {
+        // Build with a u16 prefix claiming many bytes but providing few.
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x03, 0x03]);
+        body.extend_from_slice(&[0xAA; 32]);
+        body.push(0); // session_id_len
+        body.extend_from_slice(&[0x00, 0xFF]); // cipher_suites_len = 255
+        body.extend_from_slice(&[0x13, 0x01]); // only 2 bytes follow
+        let mut handshake = Vec::new();
+        handshake.push(HANDSHAKE_TYPE_CLIENT_HELLO);
+        let body_len = body.len() as u32;
+        handshake.push(((body_len >> 16) & 0xff) as u8);
+        handshake.push(((body_len >> 8) & 0xff) as u8);
+        handshake.push((body_len & 0xff) as u8);
+        handshake.extend_from_slice(&body);
+        let record = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        assert_eq!(extract_sni(&record), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn t17_extensions_prefix_overruns() {
+        // extensions_len = 100 but only 4 follow.
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x03, 0x03]);
+        body.extend_from_slice(&[0xAA; 32]);
+        body.push(0);
+        body.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]); // cipher_suites
+        body.extend_from_slice(&[0x01, 0x00]); // compression
+        body.extend_from_slice(&[0x00, 0x64]); // extensions_len = 100
+        body.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // 4 bytes
+        let mut handshake = Vec::new();
+        handshake.push(HANDSHAKE_TYPE_CLIENT_HELLO);
+        let body_len = body.len() as u32;
+        handshake.push(((body_len >> 16) & 0xff) as u8);
+        handshake.push(((body_len >> 8) & 0xff) as u8);
+        handshake.push((body_len & 0xff) as u8);
+        handshake.extend_from_slice(&body);
+        let record = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        assert_eq!(extract_sni(&record), SniOutcome::Malformed);
+    }
+
+    // 5. Per-extension reads: ext_type + ext_data prefix + bytes.
+    #[test]
+    fn t17_extension_type_truncated_mid_u16() {
+        // extensions block claims 1 byte — half of a u16 ext_type.
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x03, 0x03]);
+        body.extend_from_slice(&[0xAA; 32]);
+        body.push(0);
+        body.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]);
+        body.extend_from_slice(&[0x01, 0x00]);
+        body.extend_from_slice(&[0x00, 0x01, 0xFF]); // 1 byte where u16 needed
+        let mut handshake = Vec::new();
+        handshake.push(HANDSHAKE_TYPE_CLIENT_HELLO);
+        let body_len = body.len() as u32;
+        handshake.push(((body_len >> 16) & 0xff) as u8);
+        handshake.push(((body_len >> 8) & 0xff) as u8);
+        handshake.push((body_len & 0xff) as u8);
+        handshake.extend_from_slice(&body);
+        let record = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        // 1-byte extensions block can't fit an ext header (4 bytes minimum).
+        // Loop never runs — CH is "valid but empty" so NotFound, not Malformed.
+        // The overrun manifests as us not even entering the loop. Pin that.
+        assert_eq!(extract_sni(&record), SniOutcome::NotFound);
+    }
+
+    // 6. SNI extension body reads: ServerNameList prefix, name_type,
+    //    host_name length prefix, host_name bytes.
+    #[test]
+    fn t17_sni_extension_body_list_prefix_overruns() {
+        // SNI extension whose body claims a u16 list len bigger than its data.
+        let mut ext = Vec::new();
+        ext.extend_from_slice(&EXT_SERVER_NAME.to_be_bytes());
+        ext.extend_from_slice(&[0x00, 0x04]); // ext_data length = 4
+        ext.extend_from_slice(&[0x00, 0xFF]); // list_len claims 255 bytes
+        ext.extend_from_slice(&[0x00, 0x00]); // only 2 bytes actually follow
+        let bytes = build_client_hello(&ext);
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn t17_sni_host_name_length_overruns_payload() {
+        // host_name length claims 100 bytes but only 5 follow.
+        let mut list = Vec::new();
+        list.push(0); // name_type = host_name
+        list.extend_from_slice(&100u16.to_be_bytes()); // host_name len = 100
+        list.extend_from_slice(&[0x65, 0x66, 0x67, 0x68, 0x69]); // 5 bytes
+        let mut body = Vec::new();
+        body.extend_from_slice(&(list.len() as u16).to_be_bytes());
+        body.extend_from_slice(&list);
+        let ext = build_extension(EXT_SERVER_NAME, &body);
+        let bytes = build_client_hello(&ext);
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    // 7. ALPN body reads: list_len + per-entry u8-prefixed proto.
+    #[test]
+    fn t17_alpn_extension_list_prefix_overruns() {
+        let mut ext = Vec::new();
+        ext.extend_from_slice(&EXT_ALPN.to_be_bytes());
+        ext.extend_from_slice(&[0x00, 0x02]); // ext_data length = 2
+        ext.extend_from_slice(&[0xFF, 0xFF]); // list_len claims 65535
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&ext);
+        let bytes = build_client_hello(&exts);
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn t17_alpn_entry_length_overruns() {
+        // ALPN list_len = 3; entry length = 10 but only 2 bytes follow.
+        let mut ext = Vec::new();
+        ext.extend_from_slice(&EXT_ALPN.to_be_bytes());
+        ext.extend_from_slice(&[0x00, 0x05]); // ext_data
+        ext.extend_from_slice(&[0x00, 0x03]); // list_len
+        ext.push(10); // entry says 10 bytes
+        ext.extend_from_slice(b"h2"); // only 2 follow
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&ext);
+        let bytes = build_client_hello(&exts);
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    // 8. supported_versions body reads.
+    #[test]
+    fn t17_supported_versions_list_prefix_overruns() {
+        let mut ext = Vec::new();
+        ext.extend_from_slice(&EXT_SUPPORTED_VERSIONS.to_be_bytes());
+        ext.extend_from_slice(&[0x00, 0x01]); // ext_data
+        ext.push(0xFF); // u8 list_len claims 255 bytes
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&ext);
+        let bytes = build_client_hello(&exts);
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    // 9. key_share body reads: list_len + per-entry group + key_exchange len.
+    #[test]
+    fn t17_key_share_list_prefix_overruns() {
+        let mut ext = Vec::new();
+        ext.extend_from_slice(&EXT_KEY_SHARE.to_be_bytes());
+        ext.extend_from_slice(&[0x00, 0x02]); // ext_data
+        ext.extend_from_slice(&[0xFF, 0xFF]); // list_len claims 65535
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&ext);
+        let bytes = build_client_hello(&exts);
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    #[test]
+    fn t17_key_share_entry_key_exchange_length_overruns() {
+        // list_len = 6, group = 0x001d, key_exchange_len = 200, but only 2 bytes follow.
+        let mut body = Vec::new();
+        body.extend_from_slice(&6u16.to_be_bytes()); // list_len
+        body.extend_from_slice(&0x001du16.to_be_bytes()); // group
+        body.extend_from_slice(&200u16.to_be_bytes()); // key_exchange_len
+        body.extend_from_slice(&[0xAB, 0xCD]); // 2 bytes
+        let ext = build_extension(EXT_KEY_SHARE, &body);
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&ext);
+        let bytes = build_client_hello(&exts);
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    // 10. record_size_limit: body must be exactly 2 bytes.
+    #[test]
+    fn t17_record_size_limit_truncated_to_1_byte() {
+        let ext = build_extension(EXT_RECORD_SIZE_LIMIT, &[0x40]); // half a u16
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&ext);
+        let bytes = build_client_hello(&exts);
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    // 11. ec_point_formats: u8-prefixed list.
+    #[test]
+    fn t17_ec_point_formats_prefix_overruns() {
+        let ext = build_extension(EXT_EC_POINT_FORMATS, &[0xFF]); // claims 255 bytes
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&ext);
+        let bytes = build_client_hello(&exts);
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
+    // 12. supported_groups / signature_algorithms (shared u16-prefixed-u16-list).
+    #[test]
+    fn t17_supported_groups_list_prefix_overruns() {
+        let mut ext = Vec::new();
+        ext.extend_from_slice(&EXT_SUPPORTED_GROUPS.to_be_bytes());
+        ext.extend_from_slice(&[0x00, 0x02]); // ext_data
+        ext.extend_from_slice(&[0xFF, 0xFF]); // list_len = 65535
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&ext);
+        let bytes = build_client_hello(&exts);
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
     // ── Trailing-bytes tolerance (C9, RFC 8446 §4) ───────────────────────────
 
     /// Local fixture: build a ClientHello whose handshake body has extra bytes

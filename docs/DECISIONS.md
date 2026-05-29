@@ -252,6 +252,27 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **T17 (P3) Length-prefix overflow tests (per-? site coverage).** Done. 21 named tests targeting each *category* of length-prefix overrun in the parser. T6 (truncation sweep) already proves no-panic at every prefix position; T17 labels the specific structural failure points so a test-plan reader can grep for the named category.
+
+  **Categories covered** (each maps to a cluster of `?` sites in `parse_handshake_message_full` / `reassemble_handshake` / `parse_server_name_extension` / extension-specific parsers):
+
+  1. Record-header reads (content_type, version, fragment_len) — 2 tests
+  2. Fragment payload shorter than claimed `fragment_len` — 1 test
+  3. Handshake-header reads (type, u24 body_len) — 2 tests
+  4. ClientHello body field overruns (legacy_version, random, session_id, cipher_suites, extensions) — 4 tests
+  5. Per-extension reads (ext_type + ext_data prefix mid-truncation) — 1 test (special: 1-byte ext block parses as NotFound rather than Malformed because the loop never enters)
+  6. SNI extension body reads (list prefix + host_name length) — 2 tests
+  7. ALPN body reads — 2 tests
+  8. supported_versions list prefix — 1 test
+  9. key_share list + entry key_exchange length — 2 tests
+  10. record_size_limit body (exactly 2 bytes required) — 1 test
+  11. ec_point_formats u8-prefixed list — 1 test
+  12. supported_groups / signature_algorithms (shared u16-prefixed-u16-list) — 1 test
+
+  **Edge case pinned in T17:** category 5 (`t17_extension_type_truncated_mid_u16`) — when the extensions block is exactly 1 byte long, the inner `while ext.remaining() >= 4` loop never enters, so the CH parses as `NotFound` rather than `Malformed`. This is the parser's "non-empty but too-short to fit an ext header" failure mode; pinning it documents the boundary.
+
+  277 tests pass (was 256 — added 21). Clippy clean both feature sets. The exhaustive label set complements T6's panic-freedom proof — T17 documents *what specifically* each overrun returns, which is the contract downstream policy code depends on.
+
 - **T16 (P3) Snapshot tests for the O1 trace event shape.** Done. 4 tests pin the wire shape of `extract_sni`'s structured trace event (target, level, outcome kind string, byte_count, duration_us) for each `SniOutcome` variant. A refactor that renamed `duration_us` to `duration_micros` or `outcome` to `verdict` would silently break every downstream dashboard built on the O2/O3 contracts — T16 catches that at test time.
 
   **Implementation:** added a small custom `tracing_subscriber::Layer` (`CapturedEvents`) that records `tracing::Event`s into a `Mutex<Vec<CapturedEvent>>` with field-by-field visitor capture. Tests install the layer via `tracing::subscriber::with_default` for the scope of the `extract_sni` call, then drain the captured events for assertions.
