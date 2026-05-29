@@ -1044,6 +1044,29 @@ pub fn hrr_sni_consistent(first: &[u8], second: &[u8]) -> Option<bool> {
 /// assert_eq!(reassemble_handshake(&[0x16, 0x03]), None);
 /// ```
 pub fn reassemble_handshake(records: &[u8]) -> Option<Cow<'_, [u8]>> {
+    parse_record_inner(records)
+}
+
+/// QUIC-friendly alias for [`reassemble_handshake`] — extracts the inner
+/// TLS handshake bytes from one or more `content_type=22` TLS records.
+///
+/// The two functions are interchangeable; this name spells out the
+/// composition relationship that [`extract_sni`] / [`parse_client_hello_full`]
+/// are built from:
+///
+/// ```text
+/// extract_sni            = parse_record + parse_handshake_only          (project to SniOutcome)
+/// parse_client_hello_full = parse_record + parse_handshake_message_full  (project to ClientHelloMetadata)
+/// ```
+///
+/// The QUIC parser, which reassembles `CRYPTO` frames itself, skips this
+/// step entirely and feeds bytes straight into [`parse_handshake_only`] /
+/// [`parse_handshake_message_full`]. SNI backlog Q2.
+pub fn parse_record(records: &[u8]) -> Option<Cow<'_, [u8]>> {
+    parse_record_inner(records)
+}
+
+fn parse_record_inner(records: &[u8]) -> Option<Cow<'_, [u8]>> {
     // P1 fast path: a complete handshake in one record means we can hand the
     // caller a `Cow::Borrowed` slice of `records` and skip the allocation
     // entirely. This is the overwhelmingly common shape for ClientHellos on
@@ -4411,6 +4434,64 @@ mod tests {
                 host: "example.com".into()
             },
         );
+    }
+
+    // ── Q2: parse_record alias + composition equivalence ─────────────────────
+
+    #[test]
+    fn q2_parse_record_matches_reassemble_handshake() {
+        let bytes = build_client_hello(&build_sni_extension("example.com"));
+        assert_eq!(
+            parse_record(&bytes).as_deref(),
+            reassemble_handshake(&bytes).as_deref(),
+        );
+        // Empty / wrong content type cases.
+        for input in [&[][..], &[0x17, 0x03, 0x01, 0x00, 0x01, 0xFF][..]] {
+            assert_eq!(parse_record(input), reassemble_handshake(input));
+        }
+    }
+
+    #[test]
+    fn q2_composition_extract_sni_equals_parse_record_then_parse_handshake_only() {
+        // The composition contract documented in parse_record's docstring:
+        //   extract_sni = parse_record + parse_handshake_only
+        // Pin it across the four canonical SniOutcome variants so any future
+        // divergence flips this test.
+        let cases: &[Vec<u8>] = &[
+            // Cleartext
+            build_client_hello(&build_sni_extension("example.com")),
+            // Encrypted
+            {
+                let mut exts = build_sni_extension("decoy.example.com");
+                exts.extend_from_slice(&build_extension(EXT_ENCRYPTED_CLIENT_HELLO, &[]));
+                build_client_hello(&exts)
+            },
+            // NotFound (empty extensions block)
+            build_client_hello(&[]),
+            // Malformed (not even a record)
+            vec![0xff, 0xff, 0xff],
+        ];
+        for bytes in cases {
+            // Compute the composition manually, promoting borrowed host bytes
+            // to owned so the result outlives the local `handshake` Cow.
+            let composed = match parse_record(bytes) {
+                None => SniOutcome::Malformed,
+                Some(handshake) => match parse_handshake_only(&handshake) {
+                    Some(SniOutcome::Cleartext { host }) => SniOutcome::Cleartext {
+                        host: alloc::borrow::Cow::Owned(host.into_owned()),
+                    },
+                    Some(SniOutcome::Encrypted) => SniOutcome::Encrypted,
+                    Some(SniOutcome::NotFound) => SniOutcome::NotFound,
+                    Some(SniOutcome::Malformed) | None => SniOutcome::Malformed,
+                },
+            };
+            assert_eq!(
+                extract_sni(bytes),
+                composed,
+                "composition broken for input len={}",
+                bytes.len(),
+            );
+        }
     }
 
     // ── Trailing-bytes tolerance (C9, RFC 8446 §4) ───────────────────────────

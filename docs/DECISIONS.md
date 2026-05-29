@@ -252,6 +252,21 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **Q2 (P1) `parse_record` alias + composition equivalence.** Done. Added `pub fn parse_record(records: &[u8]) -> Option<Cow<'_, [u8]>>` as a thin alias for `reassemble_handshake`. Same code path (both call a shared `parse_record_inner`); the name spells out the composition the higher-level entry points are built from:
+
+  ```text
+  extract_sni              = parse_record + parse_handshake_only           (project to SniOutcome)
+  parse_client_hello_full  = parse_record + parse_handshake_message_full   (project to ClientHelloMetadata)
+  ```
+
+  **The QUIC parser, which reassembles `CRYPTO` frames itself, skips this step** and feeds bytes straight into `parse_handshake_only` / `parse_handshake_message_full`. The split makes the call site self-documenting.
+
+  **Contracts pinned:**
+  - `q2_parse_record_matches_reassemble_handshake` — alias returns identical values (including the Cow Borrowed/Owned variant) across normal + edge inputs.
+  - `q2_composition_extract_sni_equals_parse_record_then_parse_handshake_only` — pins the documented composition across all 4 `SniOutcome` variants (Cleartext, Encrypted, NotFound, Malformed). Any future divergence flips this test.
+
+  282 tests pass (was 280 — added 2). Clippy clean both feature sets.
+
 - **Q1 (P1) `parse_handshake_only` entry point for QUIC.** Done. Added `pub fn parse_handshake_only(handshake: &[u8]) -> Option<SniOutcome<'_>>` as a thin alias for `parse_handshake_message`. The function already accepted handshake-only bytes (no TLS record framing) — Q1 just gives the QUIC team a call site name that's self-explanatory: "this input is handshake-only."
 
   **Why an alias, not a rename:** `parse_handshake_message` is already documented as the QUIC reuse path (its docstring has said "Made `pub` so the upcoming QUIC parser can feed already-stripped CRYPTO-frame bytes here" since C2). Renaming would break callers; aliasing is additive and zero-cost.
