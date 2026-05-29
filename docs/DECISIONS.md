@@ -252,6 +252,14 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **A12 (P3) Expose `extension_order` (high-fidelity fingerprinting input).** Done. Added `pub extension_order: Vec<u16>` on `ClientHelloMetadata` — every extension type seen, in the order they appeared on the wire. This is the raw input JA3/JA4-style fingerprints are largely built from; downstream code can hash it however they want without us baking an algorithm in.
+
+  **Zero new parser code:** the parser already builds this Vec internally as `seen_ext_types` for the C3/C4 duplicate-extension rejection (RFC 8446 §4.2). A12 just renames that local variable to `meta.extension_order` so the same single write serves both the internal dup check and the public surface. The Cow promotion path picks up the field through normal `borrowed.extension_order` flow (Vec<u16> is Copy-friendly, no lifetime concerns).
+
+  **Wire-order preservation pinned by `extension_order_records_every_type_in_wire_order`:** the parser does NOT sort or normalise — the order returned matches exactly what the client sent. Critical for fingerprinting because two clients can offer the same extension set in different orders.
+
+  **No regressions:** criterion bench (Apple Silicon, release, --quick) shows extract_sni typical at ~50 ns, fragmented ~106 ns, 127-label hot path ~268 ns — within noise of the post-P5 baseline. 178 tests pass (was 175). Clippy clean both feature sets.
+
 - **A11 (P3) Expose `ec_point_formats` (RFC 8422 §5.1.2).** Done. Added `pub const EXT_EC_POINT_FORMATS: u16 = 0x000b` and `pub ec_point_formats: Option<Vec<u8>>` on `ClientHelloMetadata`. TLS 1.2 legacy: list of ECPointFormat codepoints (`0`=uncompressed, `1`=ansiX962_compressed_prime, `2`=ansiX962_compressed_char2). Rarely meaningful in TLS 1.3 ClientHellos but still emitted by some clients as a fingerprint dimension.
 
   **Wire shape:** `u8`-prefixed list of `u8`, must be non-empty per RFC 8422 §5.1.2.

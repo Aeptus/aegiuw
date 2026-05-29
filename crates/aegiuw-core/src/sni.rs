@@ -427,6 +427,16 @@ pub struct ClientHelloMetadata<'a> {
     /// fingerprint dimension. `None` if the extension was absent.
     /// SNI backlog A11.
     pub ec_point_formats: Option<Vec<u8>>,
+    /// Every extension type seen, in the order they appeared on the wire.
+    /// Highest-fidelity fingerprinting input — JA3/JA4-style fingerprints
+    /// are largely built from this list. `Vec::new()` if the extensions
+    /// block was present but empty (a degenerate case allowed by the wire
+    /// format but never sent in practice).
+    ///
+    /// Lifted from the parser's existing `seen_ext_types` (used internally
+    /// for the C3/C4 duplicate-extension rejection) — no new parsing work.
+    /// SNI backlog A12.
+    pub extension_order: Vec<u16>,
 }
 
 /// Classified ALPN protocol identifier (SNI backlog A2).
@@ -1221,6 +1231,7 @@ pub fn parse_handshake_message_full(handshake: &[u8]) -> Option<ClientHelloMetad
         signature_algorithms: None,
         supported_groups: None,
         ec_point_formats: None,
+        extension_order: Vec::new(),
     };
     // P1: host borrows from the input `handshake` slice; no allocation.
     let mut sni_host: Option<&str> = None;
@@ -1232,7 +1243,11 @@ pub fn parse_handshake_message_full(handshake: &[u8]) -> Option<ClientHelloMetad
     // `server_name` case (SNI backlog C3, RFC 6066) and the duplicate
     // `encrypted_client_hello` case (C4) in one place. A small `Vec` is faster
     // than a `HashSet` for the realistic ~15–20 extension count per CH.
-    let mut seen_ext_types: Vec<u16> = Vec::new();
+    //
+    // A12: the same Vec doubles as the publicly-exposed `extension_order` —
+    // every-extension-seen-in-wire-order is exactly the fingerprinting input
+    // we want, so writing it once into `meta.extension_order` serves both
+    // the dup-detection internal check and the public surface.
     // RFC 8446 §4.2.11: pre_shared_key MUST be the last extension. If we've
     // already seen one and we're about to read another, that's a violation.
     // SNI backlog C11.
@@ -1247,10 +1262,10 @@ pub fn parse_handshake_message_full(handshake: &[u8]) -> Option<ClientHelloMetad
         let ext_type = ext.read_u16()?;
         let ext_data = ext.read_u16_prefixed()?;
 
-        if seen_ext_types.contains(&ext_type) {
+        if meta.extension_order.contains(&ext_type) {
             return None;
         }
-        seen_ext_types.push(ext_type);
+        meta.extension_order.push(ext_type);
         if ext_type == EXT_PRE_SHARED_KEY {
             psk_seen = true;
             // A5: surface PSK presence on the metadata. The PSK-must-be-last
@@ -1410,6 +1425,7 @@ pub fn parse_client_hello_full(bytes: &[u8]) -> Option<ClientHelloMetadata<'_>> 
                 signature_algorithms: borrowed.signature_algorithms,
                 supported_groups: borrowed.supported_groups,
                 ec_point_formats: borrowed.ec_point_formats,
+                extension_order: borrowed.extension_order,
             })
         }
     }
@@ -4034,6 +4050,62 @@ mod tests {
         exts.extend_from_slice(&build_ec_point_formats_extension(&[]));
         let bytes = build_client_hello(&exts);
         assert_eq!(parse_client_hello_full(&bytes), None);
+    }
+
+    // ── A12: extension_order (fingerprinting input) ──────────────────────────
+
+    #[test]
+    fn extension_order_records_every_type_in_wire_order() {
+        // Build a CH with a deliberate, non-canonical ordering — the parser
+        // must return exactly that order, not a sorted/normalised one.
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_supported_versions_extension(&[0x0304]));
+        exts.extend_from_slice(&build_sni_extension("example.com"));
+        exts.extend_from_slice(&build_alpn_extension(&[b"h2"]));
+        exts.extend_from_slice(&build_signature_algorithms_extension(&[0x0403]));
+        let bytes = build_client_hello(&exts);
+
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert_eq!(
+            meta.extension_order,
+            vec![
+                EXT_SUPPORTED_VERSIONS,
+                EXT_SERVER_NAME,
+                EXT_ALPN,
+                EXT_SIGNATURE_ALGORITHMS,
+            ],
+        );
+    }
+
+    #[test]
+    fn extension_order_empty_when_extensions_block_is_empty() {
+        // CH with a zero-length extensions block: parser walks zero iterations
+        // and extension_order stays Vec::new(). Degenerate but legal.
+        let bytes = build_client_hello(&[]);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(meta.extension_order.is_empty());
+    }
+
+    #[test]
+    fn extension_order_matches_seen_types_used_for_dup_detection() {
+        // Reuses-the-same-Vec contract: if dup detection fires (extension X
+        // appears twice), parsing fails before extension_order can carry the
+        // second occurrence. Pin that the public field stays consistent with
+        // the internal dup check by checking the *successful* case here.
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("example.com"));
+        exts.extend_from_slice(&build_extension(EXT_KEY_SHARE, &[0x00, 0x00]));
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        // Each type appears exactly once in extension_order — never duplicated.
+        let mut sorted = meta.extension_order.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            meta.extension_order.len(),
+            "extension_order must contain each type at most once",
+        );
     }
 
     #[test]
