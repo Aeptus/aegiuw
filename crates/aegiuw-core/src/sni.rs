@@ -136,7 +136,11 @@
 // P6: `core::net::IpAddr` is stable since Rust 1.77; we are on 1.82 so the
 // no_std swap is free. `alloc` brings `String`/`Vec` for the few places we
 // allocate (multi-record reassembly buffer, host string, hex preview).
-use alloc::string::{String, ToString};
+// P1: `Cow<'a, str>` is the host return type — borrowed from input on the
+// single-record happy path, owned on the multi-record path.
+use alloc::borrow::Cow;
+#[cfg(feature = "debug-malformed")]
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::net::IpAddr;
 
@@ -202,12 +206,19 @@ const MAX_RECORD_FRAGMENT: usize = 16_384 + 256;
 /// |                 |    attacker or a non-TLS protocol on :443.                 |
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum SniOutcome {
+pub enum SniOutcome<'a> {
     /// A visible (unencrypted) `server_name` extension was found and its host
     /// extracted. The bytes are reported verbatim, exactly as on the wire —
     /// case normalization, punycode decode, and confusables folding are the
     /// "normalize + enrich" step's job, not this parser's.
-    Cleartext { host: String },
+    ///
+    /// SNI backlog P1: the host is a [`Cow<'a, str>`] — borrowed from the
+    /// caller's input slice on the single-record happy path (zero
+    /// allocation), owned on the multi-record path (the reassembly buffer
+    /// drops at the end of `extract_sni`, so the host must be promoted to
+    /// owned to outlive the call). Callers who need a long-lived `String`
+    /// can do `.into_owned()` cheaply on either variant.
+    Cleartext { host: Cow<'a, str> },
     /// An `encrypted_client_hello` extension (type `0xfe0d`) was present. The
     /// visible SNI, if any, is a decoy and must be ignored.
     Encrypted,
@@ -219,7 +230,7 @@ pub enum SniOutcome {
     Malformed,
 }
 
-impl SniOutcome {
+impl SniOutcome<'_> {
     /// Stable lowercase string for telemetry dimensions (SNI backlog O2).
     /// Matches the `serde(rename_all = "snake_case")` shape so JSON-emitted
     /// outcomes use the same label set.
@@ -262,7 +273,7 @@ impl SniOutcome {
 /// // Truncated record (only the content-type byte) is Malformed.
 /// assert_eq!(extract_sni(&[0x16]), SniOutcome::Malformed);
 /// ```
-pub fn extract_sni(bytes: &[u8]) -> SniOutcome {
+pub fn extract_sni(bytes: &[u8]) -> SniOutcome<'_> {
     // O1: emit one structured trace event per parse with the outcome kind,
     // input size, and wall-clock duration. Downstream telemetry can group
     // by `outcome` for per-variant counters (O2) and bucket `duration_us`
@@ -279,8 +290,24 @@ pub fn extract_sni(bytes: &[u8]) -> SniOutcome {
     // counts and outcome dimensions still work.
     #[cfg(feature = "std")]
     let start = std::time::Instant::now();
+    // P1: on the single-record happy path, reassemble_handshake returns
+    // `Cow::Borrowed(&bytes[..])`, parse_handshake_message borrows the host
+    // straight from there, and the SniOutcome we return carries that borrow.
+    // On the multi-record path the reassembly buffer is owned and dropped at
+    // end of arm, so we must promote a borrowed host to owned before
+    // returning — `Cow::Owned(host.into_owned())` is the standard pattern.
     let outcome = match reassemble_handshake(bytes) {
-        Some(handshake) => parse_handshake_message(&handshake).unwrap_or(SniOutcome::Malformed),
+        Some(Cow::Borrowed(handshake)) => {
+            parse_handshake_message(handshake).unwrap_or(SniOutcome::Malformed)
+        }
+        Some(Cow::Owned(handshake)) => match parse_handshake_message(&handshake) {
+            Some(SniOutcome::Cleartext { host }) => SniOutcome::Cleartext {
+                host: Cow::Owned(host.into_owned()),
+            },
+            Some(SniOutcome::Encrypted) => SniOutcome::Encrypted,
+            Some(SniOutcome::NotFound) => SniOutcome::NotFound,
+            Some(SniOutcome::Malformed) | None => SniOutcome::Malformed,
+        },
         None => SniOutcome::Malformed,
     };
     #[cfg(feature = "std")]
@@ -417,6 +444,8 @@ pub fn is_idn_host(host: &str) -> bool {
 /// ```
 pub fn hrr_sni_consistent(first: &[u8], second: &[u8]) -> Option<bool> {
     match (extract_sni(first), extract_sni(second)) {
+        // Cow<'_, str>'s PartialEq compares via Deref<Target = str> regardless
+        // of which variant each side is, so borrowed-vs-owned doesn't matter.
         (SniOutcome::Cleartext { host: a }, SniOutcome::Cleartext { host: b }) => Some(a == b),
         _ => None,
     }
@@ -458,7 +487,64 @@ pub fn hrr_sni_consistent(first: &[u8], second: &[u8]) -> Option<bool> {
 /// // Truncated record header: refuse.
 /// assert_eq!(reassemble_handshake(&[0x16, 0x03]), None);
 /// ```
-pub fn reassemble_handshake(records: &[u8]) -> Option<Vec<u8>> {
+pub fn reassemble_handshake(records: &[u8]) -> Option<Cow<'_, [u8]>> {
+    // P1 fast path: a complete handshake in one record means we can hand the
+    // caller a `Cow::Borrowed` slice of `records` and skip the allocation
+    // entirely. This is the overwhelmingly common shape for ClientHellos on
+    // modern web traffic (typical CH ≈ 200–600 bytes; MAX_RECORD_FRAGMENT
+    // = 16 640).
+    if let Some(handshake) = try_reassemble_single_record(records) {
+        return Some(Cow::Borrowed(handshake));
+    }
+    // Slow path: fragmented or partial first record. Walk the stream and
+    // accumulate into a Vec, then return Cow::Owned.
+    reassemble_handshake_owned(records).map(Cow::Owned)
+}
+
+/// Best-effort single-record short-circuit for [`reassemble_handshake`].
+///
+/// Returns `Some(handshake)` when:
+/// - the first record is a well-formed `content_type = 22` record,
+/// - its fragment is ≥ 4 bytes (enough for the handshake header), and
+/// - the fragment payload contains a complete handshake message
+///   (`4 + body_len <= fragment_len`).
+///
+/// Returns `None` otherwise — the caller falls back to the owned slow path,
+/// which is the authoritative validator (the fast path only needs to be
+/// *safe* and *correct when it succeeds*; it does not need to detect every
+/// invalid case).
+fn try_reassemble_single_record(records: &[u8]) -> Option<&[u8]> {
+    let mut cursor = Cursor::new(records);
+    if cursor.read_u8()? != CONTENT_TYPE_HANDSHAKE {
+        return None;
+    }
+    cursor.read_u16()?; // legacy_record_version
+    let fragment_len = cursor.read_u16()? as usize;
+    if !(4..=MAX_RECORD_FRAGMENT).contains(&fragment_len) {
+        return None;
+    }
+    let fragment = cursor.read_slice(fragment_len)?;
+    let header = fragment.get(..4)?;
+    let &[_, hi, mi, lo] = header else {
+        return None;
+    };
+    let body_len = ((hi as usize) << 16) | ((mi as usize) << 8) | (lo as usize);
+    let total = 4usize.checked_add(body_len)?;
+    if total > MAX_HANDSHAKE_BYTES {
+        return None;
+    }
+    if total <= fragment_len {
+        // Trailing bytes inside the fragment are tolerated — truncate.
+        fragment.get(..total)
+    } else {
+        None
+    }
+}
+
+/// Multi-record slow path for [`reassemble_handshake`]. Always allocates a
+/// `Vec<u8>` for the assembled handshake. Kept as the authoritative
+/// implementation: the fast path defers to this on any non-trivial case.
+fn reassemble_handshake_owned(records: &[u8]) -> Option<Vec<u8>> {
     let mut cursor = Cursor::new(records);
     let mut handshake_buf: Vec<u8> = Vec::new();
     let mut expected_total: Option<usize> = None;
@@ -536,7 +622,7 @@ pub fn reassemble_handshake(records: &[u8]) -> Option<Vec<u8>> {
 ///     Some(SniOutcome::Malformed),
 /// );
 /// ```
-pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome> {
+pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome<'_>> {
     let mut c = Cursor::new(handshake);
 
     // ── Handshake header ───────────────────────────────────────────────────
@@ -597,7 +683,8 @@ pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome> {
     // Scan ALL extensions before deciding: ECH wins over any visible SNI, so
     // we must look at every extension even after spotting a server_name entry.
     let mut ech_present = false;
-    let mut sni_host: Option<String> = None;
+    // P1: host borrows from the input `handshake` slice; no allocation.
+    let mut sni_host: Option<&str> = None;
     let mut ext = Cursor::new(extensions);
 
     // RFC 8446 §4.2: "There MUST NOT be more than one extension of the same
@@ -659,7 +746,9 @@ pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome> {
     Some(if ech_present {
         SniOutcome::Encrypted
     } else if let Some(host) = sni_host {
-        SniOutcome::Cleartext { host }
+        SniOutcome::Cleartext {
+            host: Cow::Borrowed(host),
+        }
     } else {
         SniOutcome::NotFound
     })
@@ -671,9 +760,10 @@ pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome> {
 /// scanning other extensions (so a non-`host_name` entry doesn't break ECH
 /// detection), while `Malformed` propagates as `SniOutcome::Malformed` — the
 /// failure-closed signal for clear RFC violations.
-enum ServerNameOutcome {
-    /// Successfully extracted a `host_name` entry.
-    Host(String),
+enum ServerNameOutcome<'a> {
+    /// Successfully extracted a `host_name` entry (borrowed from the input
+    /// handshake bytes — see SNI backlog P1).
+    Host(&'a str),
     /// Well-formed extension but no usable host: empty list, first entry was
     /// a non-`host_name` name_type, or the host bytes weren't valid UTF-8
     /// ASCII (RFC 6066 forbids non-ASCII anyway).
@@ -694,7 +784,7 @@ enum ServerNameOutcome {
 /// violation. Subsequent entries with non-host_name types are ignored
 /// (their structure is undefined — we can't safely walk past them but we
 /// don't reject either).
-fn parse_server_name_extension(data: &[u8]) -> ServerNameOutcome {
+fn parse_server_name_extension(data: &[u8]) -> ServerNameOutcome<'_> {
     let mut c = Cursor::new(data);
     let Some(list) = c.read_u16_prefixed() else {
         return ServerNameOutcome::Malformed;
@@ -801,7 +891,8 @@ fn parse_server_name_extension(data: &[u8]) -> ServerNameOutcome {
         // host we already extracted and stop scanning the list.
     }
 
-    ServerNameOutcome::Host(host_str.to_string())
+    // P1: borrow directly from the input — no allocation.
+    ServerNameOutcome::Host(host_str)
 }
 
 /// Bounds-checked cursor over an adversary-controlled byte slice.
@@ -1587,7 +1678,10 @@ mod tests {
         assert_eq!(host.len(), 253);
         let with_dot = format!("{host}.");
         let bytes = build_client_hello(&build_sni_extension(&with_dot));
-        assert_eq!(extract_sni(&bytes), SniOutcome::Cleartext { host });
+        assert_eq!(
+            extract_sni(&bytes),
+            SniOutcome::Cleartext { host: host.into() },
+        );
     }
 
     // ── DNS length bounds (H3, RFC 1035 §2.3.4 / §3.1) ───────────────────────
@@ -1612,7 +1706,10 @@ mod tests {
         host.push('a');
         assert_eq!(host.len(), 253);
         let bytes = build_client_hello(&build_sni_extension(&host));
-        assert_eq!(extract_sni(&bytes), SniOutcome::Cleartext { host });
+        assert_eq!(
+            extract_sni(&bytes),
+            SniOutcome::Cleartext { host: host.into() },
+        );
     }
 
     #[test]
@@ -1631,7 +1728,10 @@ mod tests {
         let label = "a".repeat(63);
         let host = format!("{label}.example.com");
         let bytes = build_client_hello(&build_sni_extension(&host));
-        assert_eq!(extract_sni(&bytes), SniOutcome::Cleartext { host });
+        assert_eq!(
+            extract_sni(&bytes),
+            SniOutcome::Cleartext { host: host.into() },
+        );
     }
 
     // ── Empty-hostname rejection (H2, RFC 6066 §3) ───────────────────────────
