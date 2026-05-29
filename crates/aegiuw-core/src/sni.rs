@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+#![deny(clippy::indexing_slicing)]
+
 //! SNI extraction from a raw TLS ClientHello (PRD §1.1, FR-1).
 //!
 //! The daemon peeks at the first outbound TCP bytes *before* relaying them,
@@ -271,8 +273,12 @@ pub fn extract_sni(bytes: &[u8]) -> SniOutcome {
 /// assert!(!is_idn_host(""));
 /// ```
 pub fn is_idn_host(host: &str) -> bool {
-    host.split('.')
-        .any(|label| label.len() >= 4 && label.as_bytes()[..4].eq_ignore_ascii_case(b"xn--"))
+    host.split('.').any(|label| {
+        label
+            .as_bytes()
+            .get(..4)
+            .is_some_and(|p| p.eq_ignore_ascii_case(b"xn--"))
+    })
 }
 
 /// Verify that the SNI in a ClientHello sent *after* a HelloRetryRequest
@@ -371,9 +377,11 @@ pub fn reassemble_handshake(records: &[u8]) -> Option<Vec<u8>> {
         }
 
         if expected_total.is_none() && handshake_buf.len() >= 4 {
-            let body_len = ((handshake_buf[1] as usize) << 16)
-                | ((handshake_buf[2] as usize) << 8)
-                | (handshake_buf[3] as usize);
+            let header = handshake_buf.get(..4)?;
+            let &[_, hi, mi, lo] = header else {
+                return None;
+            };
+            let body_len = ((hi as usize) << 16) | ((mi as usize) << 8) | (lo as usize);
             let total = 4usize.checked_add(body_len)?;
             if total > MAX_HANDSHAKE_BYTES {
                 return None;
@@ -714,21 +722,20 @@ impl<'a> Cursor<'a> {
 
     pub(crate) fn read_u16(&mut self) -> Option<u16> {
         let s = self.read_slice(2)?;
-        Some(u16::from_be_bytes([s[0], s[1]]))
+        let bytes: [u8; 2] = s.try_into().ok()?;
+        Some(u16::from_be_bytes(bytes))
     }
 
     /// 24-bit big-endian length, used by the TLS Handshake header.
     pub(crate) fn read_u24(&mut self) -> Option<u32> {
         let s = self.read_slice(3)?;
-        Some(((s[0] as u32) << 16) | ((s[1] as u32) << 8) | (s[2] as u32))
+        let &[a, b, c] = s else { return None };
+        Some(((a as u32) << 16) | ((b as u32) << 8) | (c as u32))
     }
 
     pub(crate) fn read_slice(&mut self, n: usize) -> Option<&'a [u8]> {
         let end = self.pos.checked_add(n)?;
-        if end > self.bytes.len() {
-            return None;
-        }
-        let s = &self.bytes[self.pos..end];
+        let s = self.bytes.get(self.pos..end)?;
         self.pos = end;
         Some(s)
     }
@@ -749,6 +756,7 @@ impl<'a> Cursor<'a> {
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing)] // test fixtures hand-craft byte arrays; deliberate
 mod tests {
     use super::*;
 
