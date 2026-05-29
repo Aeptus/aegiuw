@@ -252,6 +252,8 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **T9 (P2) server_name extension with empty ServerNameList.** Done. 1 test pinning that the SNI extension body with `ServerNameList` u16 prefix = 0 returns Malformed. RFC 6066 §3 type construction (`<1..2^16-1>`) is non-empty; an empty list is a spec violation. Already enforced by C10 — T9 labels the fixture explicitly for the test plan. 246 tests.
+
 - **T8 (P2) Zero-length extensions block.** Done. 1 test pinning that a CH with `extensions_len = 0` parses as `SniOutcome::NotFound` (not Malformed). RFC 8446 §4.1.2's `Extension extensions<0..2^16-1>` permits zero entries by type construction. Metadata: `host = None`, `extension_order` empty, all Option fields None. 245 tests.
 
 - **T7 (P2) Coalesced-records fixture.** Done. 2 tests pinning: (a) one complete handshake + partial trailing record bytes — trailing bytes are ignored (the parser's "first complete handshake wins" contract from `reassemble_handshake` docs); (b) two records carrying one handshake (the canonical fragmentation case, named T7 so the test plan landing page finds an obvious fixture). 244 tests pass (was 242). Clippy clean.

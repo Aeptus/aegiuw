@@ -3758,6 +3758,21 @@ mod tests {
         assert!(meta.alpn_protocols.is_none());
     }
 
+    // ── T9: server_name extension with empty ServerNameList ──────────────────
+
+    #[test]
+    fn t9_server_name_extension_with_empty_list_is_malformed() {
+        // RFC 6066 §3: `ServerNameList<1..2^16-1>` is non-empty by type
+        // construction. An empty list (u16 prefix = 0) is a spec violation.
+        // Already enforced by C10 — T9 just labels the fixture explicitly.
+        let mut ext = Vec::new();
+        ext.extend_from_slice(&EXT_SERVER_NAME.to_be_bytes());
+        // extension_data: u16 length = 2, then ServerNameList u16 length = 0.
+        ext.extend_from_slice(&[0x00, 0x02, 0x00, 0x00]);
+        let bytes = build_client_hello(&ext);
+        assert_eq!(extract_sni(&bytes), SniOutcome::Malformed);
+    }
+
     // ── Trailing-bytes tolerance (C9, RFC 8446 §4) ───────────────────────────
 
     /// Local fixture: build a ClientHello whose handshake body has extra bytes
