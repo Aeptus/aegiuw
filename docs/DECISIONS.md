@@ -252,6 +252,12 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **A8 (P3) Expose `record_size_limit` (RFC 8449).** Done. Added `pub const EXT_RECORD_SIZE_LIMIT: u16 = 0x001c` and `pub record_size_limit: Option<u16>` on `ClientHelloMetadata`. The value is the maximum record-layer payload (bytes) the client is willing to receive. Useful Layer-2 fingerprint dimension and infrastructure-sizing input.
+
+  **Strictness:** RFC 8449 §4 mandates the value be in `[64, 2^14 + 1] = [64, 16385]`. Out-of-range values surface as `Malformed` (parser returns `None`) rather than being silently clamped — same failure-closed contract as the rest of the parser. The extension body must be exactly 2 bytes; trailing padding is rejected. Pinned by `record_size_limit_rejects_value_below_64`, `record_size_limit_rejects_value_above_max`, and `record_size_limit_rejects_trailing_bytes`.
+
+  **5 new tests; 164 total (was 159).** Clippy clean both feature sets.
+
 - **A7 (P2) Expose `compress_certificate` presence (RFC 8879).** Done. Added `pub const EXT_COMPRESS_CERTIFICATE: u16 = 0x001b` and `pub compress_certificate_present: bool` on `ClientHelloMetadata`. The client advertises support for one or more certificate-compression algorithms (zlib, brotli, zstd).
 
   **Why this is a fingerprint signal:** modern browsers (Chrome ≥ 89, Firefox ≥ 90) and modern TLS libraries advertise `compress_certificate`; minimal clients (e.g. `curl --resolve`, embedded TLS stacks, single-purpose scanners) often don't. The presence flag is a low-cost dimension of "is this a mainstream browser-class client?" without us having to parse JA3/JA4-style fingerprints.

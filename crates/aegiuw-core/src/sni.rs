@@ -179,6 +179,13 @@ pub const EXT_EARLY_DATA: u16 = 0x002a;
 /// if needed. SNI backlog A7.
 pub const EXT_COMPRESS_CERTIFICATE: u16 = 0x001b;
 
+/// Extension type for `record_size_limit` (RFC 8449). Body is a single
+/// `u16` value: the maximum record-layer payload size (in bytes) the
+/// client is willing to receive. RFC 8449 §4 requires the value to be
+/// in `[64, 2^14+1]`; values outside that range are spec violations and
+/// surface as `Malformed`. SNI backlog A8.
+pub const EXT_RECORD_SIZE_LIMIT: u16 = 0x001c;
+
 /// Extension type for `key_share` (RFC 8446 §4.2.8). We parse the NamedGroup
 /// IDs from the client_shares list (skipping the key_exchange bytes — we
 /// don't need the actual public keys) so Layer 2 can fingerprint
@@ -367,6 +374,13 @@ pub struct ClientHelloMetadata<'a> {
     /// added later if a higher-resolution fingerprint becomes useful.
     /// SNI backlog A7.
     pub compress_certificate_present: bool,
+    /// The `record_size_limit` extension value (RFC 8449): the maximum
+    /// record-layer payload size (in bytes) the client is willing to
+    /// receive. `None` if the extension was absent (the default
+    /// `2^14 + 256 = 16640` applies). When present, the value is guaranteed
+    /// to be in `[64, 2^14 + 1] = [64, 16385]` — our strictness layer
+    /// rejects out-of-range values as Malformed. SNI backlog A8.
+    pub record_size_limit: Option<u16>,
 }
 
 /// Classified ALPN protocol identifier (SNI backlog A2).
@@ -1157,6 +1171,7 @@ pub fn parse_handshake_message_full(handshake: &[u8]) -> Option<ClientHelloMetad
         psk_present: false,
         early_data_present: false,
         compress_certificate_present: false,
+        record_size_limit: None,
     };
     // P1: host borrows from the input `handshake` slice; no allocation.
     let mut sni_host: Option<&str> = None;
@@ -1233,6 +1248,9 @@ pub fn parse_handshake_message_full(handshake: &[u8]) -> Option<ClientHelloMetad
             }
             EXT_COMPRESS_CERTIFICATE => {
                 meta.compress_certificate_present = true;
+            }
+            EXT_RECORD_SIZE_LIMIT => {
+                meta.record_size_limit = Some(parse_record_size_limit_extension(ext_data)?);
             }
             _ => {}
         }
@@ -1330,6 +1348,7 @@ pub fn parse_client_hello_full(bytes: &[u8]) -> Option<ClientHelloMetadata<'_>> 
                 psk_present: borrowed.psk_present,
                 early_data_present: borrowed.early_data_present,
                 compress_certificate_present: borrowed.compress_certificate_present,
+                record_size_limit: borrowed.record_size_limit,
             })
         }
     }
@@ -1354,6 +1373,27 @@ fn parse_alpn_extension(data: &[u8]) -> Option<Vec<Cow<'_, [u8]>>> {
         out.push(Cow::Borrowed(proto));
     }
     Some(out)
+}
+
+/// Parse the body of a `record_size_limit` extension (RFC 8449): a single
+/// `u16` value, validated to be in `[64, 2^14 + 1]`. Returns `None` if the
+/// body isn't exactly 2 bytes or the value is out of range. SNI backlog A8.
+fn parse_record_size_limit_extension(data: &[u8]) -> Option<u16> {
+    let mut c = Cursor::new(data);
+    let limit = c.read_u16()?;
+    // Reject trailing bytes — the extension body is exactly 2 bytes per
+    // RFC 8449 §4, and tolerating padding here would be more lenient than
+    // the rest of our parser.
+    if c.remaining() != 0 {
+        return None;
+    }
+    // RFC 8449 §4: "Endpoints MUST NOT send a value less than 64." The
+    // upper bound is 2^14 + 1 = 16385 (one byte of content type plus 2^14
+    // bytes of payload, see RFC 8446 §5.1).
+    if !(64..=16385).contains(&limit) {
+        return None;
+    }
+    Some(limit)
 }
 
 /// Parse the body of a `key_share` extension as it appears in a ClientHello
@@ -3695,6 +3735,58 @@ mod tests {
         let bytes = build_client_hello(&exts);
         let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
         assert!(meta.compress_certificate_present);
+    }
+
+    // ── A8: record_size_limit (RFC 8449) ─────────────────────────────────────
+
+    fn build_record_size_limit_extension(limit: u16) -> Vec<u8> {
+        build_extension(EXT_RECORD_SIZE_LIMIT, &limit.to_be_bytes())
+    }
+
+    #[test]
+    fn record_size_limit_extracted_when_present() {
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&build_record_size_limit_extension(16384));
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert_eq!(meta.record_size_limit, Some(16384));
+    }
+
+    #[test]
+    fn record_size_limit_none_when_absent() {
+        let bytes = build_client_hello(&build_sni_extension("example.com"));
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert_eq!(meta.record_size_limit, None);
+    }
+
+    #[test]
+    fn record_size_limit_rejects_value_below_64() {
+        // RFC 8449 §4: minimum is 64.
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&build_record_size_limit_extension(63));
+        let bytes = build_client_hello(&exts);
+        assert_eq!(parse_client_hello_full(&bytes), None);
+    }
+
+    #[test]
+    fn record_size_limit_rejects_value_above_max() {
+        // RFC 8449 §4: maximum is 2^14 + 1 = 16385.
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&build_record_size_limit_extension(16386));
+        let bytes = build_client_hello(&exts);
+        assert_eq!(parse_client_hello_full(&bytes), None);
+    }
+
+    #[test]
+    fn record_size_limit_rejects_trailing_bytes() {
+        // Exactly 2 bytes per RFC 8449 §4.
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&build_extension(
+            EXT_RECORD_SIZE_LIMIT,
+            &[0x40, 0x01, 0xFF], // value=16385 + trailing 0xFF
+        ));
+        let bytes = build_client_hello(&exts);
+        assert_eq!(parse_client_hello_full(&bytes), None);
     }
 
     #[test]
