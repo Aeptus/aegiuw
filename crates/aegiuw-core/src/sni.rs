@@ -157,6 +157,20 @@ pub const EXT_ENCRYPTED_CLIENT_HELLO: u16 = 0xfe0d;
 /// where another extension follows `pre_shared_key` is malformed.
 pub const EXT_PRE_SHARED_KEY: u16 = 0x0029;
 
+/// Extension type for `application_layer_protocol_negotiation` (RFC 7301).
+/// Surfaces in [`ClientHelloMetadata::alpn_protocols`] (SNI backlog A1).
+pub const EXT_ALPN: u16 = 0x0010;
+
+/// Extension type for `supported_versions` (RFC 8446 §4.2.1). In a
+/// ClientHello its body is a `u8`-prefixed list of `u16` versions.
+/// Surfaces in [`ClientHelloMetadata::supported_versions`] (SNI backlog A1).
+pub const EXT_SUPPORTED_VERSIONS: u16 = 0x002b;
+
+/// Extension type for `key_share` (RFC 8446 §4.2.8). We only check presence;
+/// the body's group/key bytes aren't required for our routing decisions.
+/// Surfaces in [`ClientHelloMetadata::key_share_present`] (SNI backlog A1).
+pub const EXT_KEY_SHARE: u16 = 0x0033;
+
 /// TLS record content type for handshake messages.
 pub const CONTENT_TYPE_HANDSHAKE: u8 = 22;
 
@@ -244,6 +258,62 @@ impl SniOutcome<'_> {
     }
 }
 
+/// Full set of observable fields extracted from a TLS ClientHello.
+///
+/// Returned by [`parse_client_hello_full`] (records → metadata) and by
+/// [`parse_handshake_message_full`] (already-reassembled handshake →
+/// metadata). [`SniOutcome`] is a strict projection of this type — the
+/// existing `extract_sni` / `parse_handshake_message` entry points are thin
+/// wrappers that call the full parser and drop everything except the host
+/// and ECH-presence signal.
+///
+/// SNI backlog A1.
+///
+/// **Strictness:** identical to `extract_sni`. A ClientHello that fails any
+/// structural check (bad cipher list, oversized session_id, duplicated
+/// extension, RFC-violating ServerName entry, etc.) returns `None`. There is
+/// no lenient mode — see DECISIONS for the rationale.
+///
+/// **Lifetimes:** every borrowed field is tied to the input slice via `'a`.
+/// On the single-record happy path, all fields borrow directly from the
+/// caller's bytes (zero allocation for the slice contents — the only
+/// allocations are the `Vec` containers themselves, which are typically tiny:
+/// 0–2 ALPN entries, 0–4 supported_versions entries). On the multi-record
+/// path the reassembly buffer is owned and dropped at end of arm, so every
+/// borrowed field is promoted to owned by [`parse_client_hello_full`] before
+/// returning.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ClientHelloMetadata<'a> {
+    /// Visible SNI host, if a `server_name` extension carried one and it
+    /// passed the H1–H5 hostname checks. Mirrors `SniOutcome::Cleartext.host`.
+    /// `None` when SNI was absent, when ECH was present (outer SNI is a
+    /// decoy per DECISIONS.C14 — we deliberately null it here), or when the
+    /// SNI extension was well-formed but carried a non-`host_name`
+    /// `name_type`.
+    pub host: Option<Cow<'a, str>>,
+    /// `true` if an `encrypted_client_hello` (0xfe0d) extension was seen.
+    /// When set, [`host`] is `None` regardless of any visible SNI on the
+    /// wire — the visible SNI is a decoy.
+    ///
+    /// [`host`]: ClientHelloMetadata::host
+    pub ech_present: bool,
+    /// ALPN extension contents in wire order. `None` if the extension was
+    /// absent (client offered no preference); `Some(vec)` if present, with
+    /// each entry a single protocol identifier (e.g. `b"h2"`, `b"http/1.1"`).
+    /// The container is `Cow<'a, [u8]>` per-entry so each protocol can be
+    /// borrowed on the single-record path and owned on the multi-record path.
+    pub alpn_protocols: Option<Vec<Cow<'a, [u8]>>>,
+    /// `supported_versions` extension contents (each entry a wire TLS version,
+    /// e.g. `0x0304` = TLS 1.3, `0x0303` = TLS 1.2). `None` if the extension
+    /// was absent (then the legacy `0x0303` in the ClientHello header is the
+    /// negotiated version).
+    pub supported_versions: Option<Vec<u16>>,
+    /// `true` if a `key_share` extension was present, regardless of its
+    /// contents. Useful to detect "TLS 1.3-style" handshakes even when the
+    /// `supported_versions` extension is absent.
+    pub key_share_present: bool,
+}
+
 /// Parse the supplied bytes as a TLS ClientHello and report what was observed
 /// about the Server Name Indication.
 ///
@@ -290,25 +360,15 @@ pub fn extract_sni(bytes: &[u8]) -> SniOutcome<'_> {
     // counts and outcome dimensions still work.
     #[cfg(feature = "std")]
     let start = std::time::Instant::now();
-    // P1: on the single-record happy path, reassemble_handshake returns
-    // `Cow::Borrowed(&bytes[..])`, parse_handshake_message borrows the host
-    // straight from there, and the SniOutcome we return carries that borrow.
-    // On the multi-record path the reassembly buffer is owned and dropped at
-    // end of arm, so we must promote a borrowed host to owned before
-    // returning — `Cow::Owned(host.into_owned())` is the standard pattern.
-    let outcome = match reassemble_handshake(bytes) {
-        Some(Cow::Borrowed(handshake)) => {
-            parse_handshake_message(handshake).unwrap_or(SniOutcome::Malformed)
-        }
-        Some(Cow::Owned(handshake)) => match parse_handshake_message(&handshake) {
-            Some(SniOutcome::Cleartext { host }) => SniOutcome::Cleartext {
-                host: Cow::Owned(host.into_owned()),
-            },
-            Some(SniOutcome::Encrypted) => SniOutcome::Encrypted,
-            Some(SniOutcome::NotFound) => SniOutcome::NotFound,
-            Some(SniOutcome::Malformed) | None => SniOutcome::Malformed,
-        },
+    // A1: extract_sni is now a thin projection over parse_client_hello_full,
+    // which handles reassembly + multi-record Cow promotion in one place.
+    let outcome = match parse_client_hello_full(bytes) {
         None => SniOutcome::Malformed,
+        Some(meta) if meta.ech_present => SniOutcome::Encrypted,
+        Some(meta) => match meta.host {
+            Some(host) => SniOutcome::Cleartext { host },
+            None => SniOutcome::NotFound,
+        },
     };
     #[cfg(feature = "std")]
     tracing::trace!(
@@ -595,39 +655,30 @@ fn reassemble_handshake_owned(records: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-/// Parse an already-reassembled handshake message (no record framing) and
-/// extract the SNI status.
+/// Parse an already-reassembled handshake message into the full set of
+/// observable fields (SNI backlog A1).
 ///
-/// Returns `None` to mean "the bytes don't look like a handshake at all"
-/// (caller surfaces this as [`SniOutcome::Malformed`]); returns
-/// `Some(outcome)` for any observable result, including a malformed
-/// ClientHello explicitly tagged as [`SniOutcome::Malformed`].
-///
-/// Made `pub` so the upcoming QUIC parser can feed already-stripped
-/// CRYPTO-frame bytes here without going through record reassembly first.
+/// This is the canonical parser; [`parse_handshake_message`] is a thin
+/// projection over its result. Returns `None` to mean "the bytes don't look
+/// like a handshake at all" (caller surfaces this as
+/// [`SniOutcome::Malformed`]) or "the ClientHello is malformed and we want
+/// failure-closed semantics" (any internal RFC violation). Strictness is
+/// identical to [`extract_sni`].
 ///
 /// # Examples
 ///
 /// ```
-/// use aegiuw_core::{parse_handshake_message, SniOutcome};
+/// use aegiuw_core::parse_handshake_message_full;
 ///
 /// // Empty input: not even a handshake header.
-/// assert_eq!(parse_handshake_message(&[]), None);
-///
-/// // Wrong handshake type (0x02 = ServerHello, not ClientHello): observed
-/// // as Malformed, not None — the bytes *are* a handshake, just not one
-/// // we can extract SNI from.
-/// assert_eq!(
-///     parse_handshake_message(&[0x02, 0x00, 0x00, 0x00]),
-///     Some(SniOutcome::Malformed),
-/// );
+/// assert_eq!(parse_handshake_message_full(&[]), None);
 /// ```
-pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome<'_>> {
+pub fn parse_handshake_message_full(handshake: &[u8]) -> Option<ClientHelloMetadata<'_>> {
     let mut c = Cursor::new(handshake);
 
     // ── Handshake header ───────────────────────────────────────────────────
     if c.read_u8()? != HANDSHAKE_TYPE_CLIENT_HELLO {
-        return Some(SniOutcome::Malformed);
+        return None;
     }
     c.read_u24()?; // handshake body length (we trust the caller's reassembly)
 
@@ -638,7 +689,7 @@ pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome<'_>> {
     // such wire value means we're looking at obsolete or hostile traffic and
     // should refuse to extract a fork decision from it. SNI backlog C5.
     if c.read_u16()? != TLS_LEGACY_VERSION {
-        return Some(SniOutcome::Malformed);
+        return None;
     }
     c.read_slice(32)?; // random
 
@@ -647,7 +698,7 @@ pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome<'_>> {
     // the u8 length prefix's 0–255 range. SNI backlog C8.
     let session_id = c.read_u8_prefixed()?;
     if session_id.len() > 32 {
-        return Some(SniOutcome::Malformed);
+        return None;
     }
 
     // RFC 8446 §4.1.2: `cipher_suites<2..2^16-2>` — at least one suite, and
@@ -656,7 +707,7 @@ pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome<'_>> {
     // SNI backlog C7.
     let cipher_suites = c.read_u16_prefixed()?;
     if cipher_suites.is_empty() || cipher_suites.len() % 2 != 0 {
-        return Some(SniOutcome::Malformed);
+        return None;
     }
 
     // RFC 8446 §4.1.2: a TLS 1.3 ClientHello MUST list a single null
@@ -667,7 +718,7 @@ pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome<'_>> {
     // of only non-null methods is rejected.
     let compression = c.read_u8_prefixed()?;
     if !compression.contains(&0) {
-        return Some(SniOutcome::Malformed);
+        return None;
     }
 
     // ── Extensions ─────────────────────────────────────────────────────────
@@ -680,9 +731,15 @@ pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome<'_>> {
     // reject. SNI backlog C9.
     let extensions = c.read_u16_prefixed()?;
 
-    // Scan ALL extensions before deciding: ECH wins over any visible SNI, so
-    // we must look at every extension even after spotting a server_name entry.
-    let mut ech_present = false;
+    // A1: collect every field the metadata struct exposes. Scan ALL extensions
+    // before deciding so ECH always wins over any visible SNI (DECISIONS.C14).
+    let mut meta = ClientHelloMetadata {
+        host: None,
+        ech_present: false,
+        alpn_protocols: None,
+        supported_versions: None,
+        key_share_present: false,
+    };
     // P1: host borrows from the input `handshake` slice; no allocation.
     let mut sni_host: Option<&str> = None;
     let mut ext = Cursor::new(extensions);
@@ -703,13 +760,13 @@ pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome<'_>> {
         if psk_seen {
             // Any extension after pre_shared_key violates the "MUST be last"
             // rule. Refuse the whole ClientHello.
-            return Some(SniOutcome::Malformed);
+            return None;
         }
         let ext_type = ext.read_u16()?;
         let ext_data = ext.read_u16_prefixed()?;
 
         if seen_ext_types.contains(&ext_type) {
-            return Some(SniOutcome::Malformed);
+            return None;
         }
         seen_ext_types.push(ext_type);
         if ext_type == EXT_PRE_SHARED_KEY {
@@ -718,7 +775,7 @@ pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome<'_>> {
 
         match ext_type {
             EXT_ENCRYPTED_CLIENT_HELLO => {
-                ech_present = true;
+                meta.ech_present = true;
             }
             EXT_SERVER_NAME => {
                 match parse_server_name_extension(ext_data) {
@@ -735,23 +792,153 @@ pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome<'_>> {
                         // RFC violation inside the extension itself (e.g. two
                         // `host_name` entries in the same ServerNameList,
                         // truncated length prefix). Reject the whole CH.
-                        return Some(SniOutcome::Malformed);
+                        return None;
                     }
                 }
+            }
+            EXT_ALPN => {
+                meta.alpn_protocols = Some(parse_alpn_extension(ext_data)?);
+            }
+            EXT_SUPPORTED_VERSIONS => {
+                meta.supported_versions = Some(parse_supported_versions_extension(ext_data)?);
+            }
+            EXT_KEY_SHARE => {
+                meta.key_share_present = true;
             }
             _ => {}
         }
     }
 
-    Some(if ech_present {
-        SniOutcome::Encrypted
-    } else if let Some(host) = sni_host {
-        SniOutcome::Cleartext {
-            host: Cow::Borrowed(host),
-        }
-    } else {
-        SniOutcome::NotFound
+    // DECISIONS.C14: ECH masks the outer SNI as a decoy. Only publish the
+    // host when ECH is absent.
+    if !meta.ech_present {
+        meta.host = sni_host.map(Cow::Borrowed);
+    }
+    Some(meta)
+}
+
+/// Parse an already-reassembled handshake message and project to a
+/// [`SniOutcome`].
+///
+/// Thin wrapper over [`parse_handshake_message_full`] that drops every field
+/// except `host` / `ech_present` (SNI backlog A1).
+///
+/// Returns `None` only when the bytes don't look like a handshake at all
+/// (caller surfaces as `Malformed`); a structurally-parseable but
+/// spec-violating CH returns `Some(SniOutcome::Malformed)` so the difference
+/// between "not a handshake" and "a bad handshake" is preserved.
+///
+/// Kept `pub` so the upcoming QUIC parser can feed already-stripped
+/// CRYPTO-frame bytes here without going through record reassembly first.
+///
+/// # Examples
+///
+/// ```
+/// use aegiuw_core::{parse_handshake_message, SniOutcome};
+///
+/// // Empty input: not even a handshake header.
+/// assert_eq!(parse_handshake_message(&[]), None);
+///
+/// // Wrong handshake type (0x02 = ServerHello, not ClientHello): observed
+/// // as Malformed, not None — the bytes *are* a handshake, just not one
+/// // we can extract SNI from.
+/// assert_eq!(
+///     parse_handshake_message(&[0x02, 0x00, 0x00, 0x00]),
+///     Some(SniOutcome::Malformed),
+/// );
+/// ```
+pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome<'_>> {
+    // The difference between None ("not a handshake") and
+    // Some(SniOutcome::Malformed) ("a handshake we refuse") matters to
+    // extract_sni's contract. We preserve it by inspecting the first byte
+    // here: if it isn't HANDSHAKE_TYPE_CLIENT_HELLO we mirror today's
+    // None-vs-Some(Malformed) behaviour exactly. The full parser internally
+    // returns None for both "wrong type" and "malformed body" — we widen
+    // that to Some(Malformed) for the malformed-body case so contract
+    // semantics survive the refactor.
+    match handshake.first() {
+        None => return None,
+        Some(&b) if b != HANDSHAKE_TYPE_CLIENT_HELLO => return Some(SniOutcome::Malformed),
+        Some(_) => {}
+    }
+    Some(match parse_handshake_message_full(handshake) {
+        None => SniOutcome::Malformed,
+        Some(meta) if meta.ech_present => SniOutcome::Encrypted,
+        Some(meta) => match meta.host {
+            Some(host) => SniOutcome::Cleartext { host },
+            None => SniOutcome::NotFound,
+        },
     })
+}
+
+/// Parse a TLS ClientHello (records-level entry) into the full set of
+/// observable fields (SNI backlog A1).
+///
+/// Reassembles records via [`reassemble_handshake`] then walks the
+/// ClientHello via [`parse_handshake_message_full`]. On the multi-record
+/// path the reassembly buffer is dropped at end of arm, so every borrowed
+/// field is promoted to owned before returning — the API stays uniform
+/// regardless of input shape.
+///
+/// Returns `None` on any structural failure (not a handshake, malformed
+/// body, fragmented past `MAX_HANDSHAKE_BYTES`, etc.) — same strictness as
+/// [`extract_sni`].
+pub fn parse_client_hello_full(bytes: &[u8]) -> Option<ClientHelloMetadata<'_>> {
+    match reassemble_handshake(bytes)? {
+        Cow::Borrowed(handshake) => parse_handshake_message_full(handshake),
+        Cow::Owned(handshake) => {
+            let borrowed = parse_handshake_message_full(&handshake)?;
+            // Promote every borrowed field to owned. Container Vecs survive
+            // verbatim; the per-entry borrows are upgraded to Cow::Owned.
+            Some(ClientHelloMetadata {
+                host: borrowed.host.map(|h| Cow::Owned(h.into_owned())),
+                ech_present: borrowed.ech_present,
+                alpn_protocols: borrowed
+                    .alpn_protocols
+                    .map(|v| v.into_iter().map(|c| Cow::Owned(c.into_owned())).collect()),
+                supported_versions: borrowed.supported_versions,
+                key_share_present: borrowed.key_share_present,
+            })
+        }
+    }
+}
+
+/// Parse the body of an ALPN extension (RFC 7301): a `u16`-prefixed list of
+/// `u8`-prefixed protocol identifiers. Returns `None` if any length prefix
+/// overruns; returns `Some(empty)` if the list is empty (RFC 7301 §3.1
+/// allows zero entries — we tolerate, even though it's a degenerate case
+/// servers usually reject).
+fn parse_alpn_extension(data: &[u8]) -> Option<Vec<Cow<'_, [u8]>>> {
+    let mut c = Cursor::new(data);
+    let list = c.read_u16_prefixed()?;
+    let mut entries = Cursor::new(list);
+    let mut out: Vec<Cow<'_, [u8]>> = Vec::new();
+    while entries.remaining() > 0 {
+        let proto = entries.read_u8_prefixed()?;
+        if proto.is_empty() {
+            // RFC 7301 §3.1: each ProtocolName MUST be non-empty.
+            return None;
+        }
+        out.push(Cow::Borrowed(proto));
+    }
+    Some(out)
+}
+
+/// Parse the body of a `supported_versions` extension as it appears in a
+/// ClientHello (RFC 8446 §4.2.1): a `u8`-prefixed list of `u16` versions.
+/// Returns `None` if the byte length is odd or the prefix overruns.
+fn parse_supported_versions_extension(data: &[u8]) -> Option<Vec<u16>> {
+    let mut c = Cursor::new(data);
+    let list = c.read_u8_prefixed()?;
+    if list.is_empty() || list.len() % 2 != 0 {
+        return None;
+    }
+    let mut versions = Cursor::new(list);
+    let mut out: Vec<u16> = Vec::with_capacity(list.len() / 2);
+    while versions.remaining() > 0 {
+        out.push(versions.read_u16()?);
+    }
+    Some(out)
 }
 
 /// Result of parsing one `server_name` extension's body.
@@ -2404,5 +2591,162 @@ mod tests {
         records.extend_from_slice(&wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake[..split]));
         records.extend_from_slice(&wrap_record(0x17, &handshake[split..]));
         assert_eq!(extract_sni(&records), SniOutcome::Malformed);
+    }
+
+    // ── A1: parse_client_hello_full + ClientHelloMetadata ────────────────────
+
+    /// Build an ALPN extension body from a list of protocol identifiers.
+    /// Layout (RFC 7301): `u16` total list length + repeated `u8`-prefixed
+    /// protocol_name entries.
+    fn build_alpn_extension(protos: &[&[u8]]) -> Vec<u8> {
+        let mut list: Vec<u8> = Vec::new();
+        for p in protos {
+            list.push(p.len() as u8);
+            list.extend_from_slice(p);
+        }
+        let mut body = Vec::new();
+        body.extend_from_slice(&(list.len() as u16).to_be_bytes());
+        body.extend_from_slice(&list);
+        build_extension(EXT_ALPN, &body)
+    }
+
+    /// Build a supported_versions extension body for a ClientHello (RFC 8446
+    /// §4.2.1): `u8`-prefixed list of `u16` versions.
+    fn build_supported_versions_extension(versions: &[u16]) -> Vec<u8> {
+        let mut list: Vec<u8> = Vec::new();
+        for v in versions {
+            list.extend_from_slice(&v.to_be_bytes());
+        }
+        let mut body = Vec::new();
+        body.push(list.len() as u8);
+        body.extend_from_slice(&list);
+        build_extension(EXT_SUPPORTED_VERSIONS, &body)
+    }
+
+    #[test]
+    fn parse_client_hello_full_extracts_host_alpn_versions_and_key_share() {
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("example.com"));
+        exts.extend_from_slice(&build_alpn_extension(&[b"h2", b"http/1.1"]));
+        exts.extend_from_slice(&build_supported_versions_extension(&[0x0304, 0x0303]));
+        exts.extend_from_slice(&build_extension(EXT_KEY_SHARE, &[0x00, 0x00])); // empty client_shares
+        let bytes = build_client_hello(&exts);
+
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert_eq!(meta.host.as_deref(), Some("example.com"));
+        assert!(!meta.ech_present);
+        let alpn = meta.alpn_protocols.as_ref().expect("ALPN parsed");
+        assert_eq!(alpn.len(), 2);
+        assert_eq!(&*alpn[0], b"h2");
+        assert_eq!(&*alpn[1], b"http/1.1");
+        assert_eq!(
+            meta.supported_versions.as_deref(),
+            Some(&[0x0304, 0x0303][..])
+        );
+        assert!(meta.key_share_present);
+    }
+
+    #[test]
+    fn parse_client_hello_full_returns_none_alpn_when_absent() {
+        let bytes = build_client_hello(&build_sni_extension("example.com"));
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(meta.alpn_protocols.is_none(), "extension absent -> None");
+        assert!(meta.supported_versions.is_none());
+        assert!(!meta.key_share_present);
+    }
+
+    #[test]
+    fn parse_client_hello_full_masks_host_when_ech_present() {
+        // DECISIONS.C14: ECH outer SNI is a decoy. Metadata must null the host.
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("decoy.example.com"));
+        exts.extend_from_slice(&build_extension(EXT_ENCRYPTED_CLIENT_HELLO, &[]));
+        let bytes = build_client_hello(&exts);
+
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(meta.ech_present);
+        assert!(meta.host.is_none(), "ECH must mask the outer SNI");
+    }
+
+    #[test]
+    fn parse_client_hello_full_rejects_empty_alpn_protocol_name() {
+        // RFC 7301 §3.1: each ProtocolName MUST be non-empty. A zero-length
+        // entry inside an otherwise well-formed list is a spec violation.
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u16.to_be_bytes()); // list length 1
+        body.push(0); // zero-length proto
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("example.com"));
+        exts.extend_from_slice(&build_extension(EXT_ALPN, &body));
+        let bytes = build_client_hello(&exts);
+        assert_eq!(parse_client_hello_full(&bytes), None);
+    }
+
+    #[test]
+    fn parse_client_hello_full_rejects_odd_length_supported_versions() {
+        // Each version is u16 — odd list length is a spec violation.
+        let mut body = Vec::new();
+        body.push(3); // u8 list length = 3 (odd)
+        body.extend_from_slice(&[0x03, 0x04, 0x03]); // truncated
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("example.com"));
+        exts.extend_from_slice(&build_extension(EXT_SUPPORTED_VERSIONS, &body));
+        let bytes = build_client_hello(&exts);
+        assert_eq!(parse_client_hello_full(&bytes), None);
+    }
+
+    #[test]
+    fn extract_sni_is_thin_projection_of_parse_client_hello_full() {
+        // Pin the contract that extract_sni is just a projection — for every
+        // input the two functions agree on the host/ECH signal.
+        let inputs: &[Vec<u8>] = &[
+            // Cleartext SNI
+            build_client_hello(&build_sni_extension("example.com")),
+            // ECH masking SNI
+            {
+                let mut exts = Vec::new();
+                exts.extend_from_slice(&build_sni_extension("decoy.example.com"));
+                exts.extend_from_slice(&build_extension(EXT_ENCRYPTED_CLIENT_HELLO, &[]));
+                build_client_hello(&exts)
+            },
+            // No SNI extension at all
+            build_client_hello(&[]),
+            // Garbage — not even a record
+            vec![0xff, 0xff, 0xff],
+        ];
+        for bytes in inputs {
+            let projected = match parse_client_hello_full(bytes) {
+                None => SniOutcome::Malformed,
+                Some(m) if m.ech_present => SniOutcome::Encrypted,
+                Some(m) => match m.host {
+                    Some(host) => SniOutcome::Cleartext { host },
+                    None => SniOutcome::NotFound,
+                },
+            };
+            assert_eq!(extract_sni(bytes), projected, "input len={}", bytes.len());
+        }
+    }
+
+    #[test]
+    fn parse_handshake_message_full_borrows_alpn_entries_from_input() {
+        // P1/A1 zero-alloc contract: on the borrowed path, every ALPN entry
+        // must be Cow::Borrowed (a pointer into the input slice). This test
+        // would silently still pass on Cow::Owned — pinning the Borrowed
+        // variant explicitly catches accidental allocations in the parser.
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("example.com"));
+        exts.extend_from_slice(&build_alpn_extension(&[b"h2"]));
+        let bytes = build_client_hello(&exts);
+
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        let alpn = meta.alpn_protocols.expect("ALPN parsed");
+        assert!(
+            matches!(alpn[0], Cow::Borrowed(_)),
+            "expected borrowed ALPN"
+        );
+        assert!(
+            matches!(meta.host, Some(Cow::Borrowed(_))),
+            "expected borrowed host"
+        );
     }
 }

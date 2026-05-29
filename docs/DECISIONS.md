@@ -252,6 +252,35 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **A1 (P1) `parse_client_hello_full` + `ClientHelloMetadata`.** Done. Added a full-metadata parser entry point and refactored `extract_sni` and `parse_handshake_message` into thin projections over it.
+
+  **New public surface:**
+  - `pub struct ClientHelloMetadata<'a>` with fields: `host: Option<Cow<'a, str>>`, `ech_present: bool`, `alpn_protocols: Option<Vec<Cow<'a, [u8]>>>`, `supported_versions: Option<Vec<u16>>`, `key_share_present: bool`.
+  - `pub fn parse_client_hello_full(bytes: &[u8]) -> Option<ClientHelloMetadata<'_>>` — records-level entry; handles single/multi-record reassembly and Cow promotion.
+  - `pub fn parse_handshake_message_full(handshake: &[u8]) -> Option<ClientHelloMetadata<'_>>` — already-reassembled entry; for the QUIC parser when it ships.
+  - Three new extension-type constants: `EXT_ALPN = 0x0010`, `EXT_SUPPORTED_VERSIONS = 0x002b`, `EXT_KEY_SHARE = 0x0033`.
+
+  **Strictness:** identical to today's `extract_sni`. Any structural violation (bad cipher list, oversized session_id, duplicated extension, RFC-violating ServerName, empty ALPN ProtocolName, odd-length supported_versions byte count, PSK-not-last, etc.) returns `None` from the full parser, `Some(SniOutcome::Malformed)` from the projecting `extract_sni`. One contract, no lenient mode — the rationale is that downstream telemetry already has the `outcome` dimension from O2 to distinguish "malformed" from "not found", and a dual strict/lenient surface would double the API area without a concrete use case.
+
+  **ECH masks the outer host.** Per DECISIONS.C14 the outer SNI in an ECH-bearing ClientHello is a decoy. `ClientHelloMetadata.host` is `None` whenever `ech_present` is `true`, regardless of any visible `server_name` extension on the wire. Pinned by `parse_client_hello_full_masks_host_when_ech_present`.
+
+  **`extract_sni` is now a thin wrapper:**
+  ```rust
+  match parse_client_hello_full(bytes) {
+      None => SniOutcome::Malformed,
+      Some(meta) if meta.ech_present => SniOutcome::Encrypted,
+      Some(meta) => match meta.host {
+          Some(host) => SniOutcome::Cleartext { host },
+          None => SniOutcome::NotFound,
+      },
+  }
+  ```
+  Pinned by `extract_sni_is_thin_projection_of_parse_client_hello_full` across the four canonical input shapes (cleartext, ECH, no SNI, garbage).
+
+  **Lifetimes/allocation contract:** identical to P1. Single-record path: every borrowed field (host bytes, ALPN entries) is `Cow::Borrowed`, zero per-byte allocation; only the small `Vec` containers for ALPN and supported_versions are allocated (typically 1–4 entries each). Multi-record path: `parse_client_hello_full` promotes everything to `Cow::Owned` before returning. Pinned by `parse_handshake_message_full_borrows_alpn_entries_from_input`.
+
+  **Measured impact (criterion `--quick`):** no regression on existing benches — `extract_sni` typical actually shaved a touch (51 → 46 ns) because the refactor let LLVM inline the projection more aggressively. The cost of also parsing ALPN/supported_versions is ~5 ns per CH on the hot path; absorbed into the same bench's noise floor. Net: 120 tests pass (was 113; 7 new: ALPN/versions/key_share extraction, ECH-masks-host, empty-ALPN-rejection, odd-length-versions-rejection, the projection-equivalence pin, and the borrow-vs-owned pin); clippy clean for both `--all-targets` and `--no-default-features --lib`.
+
 - **C1 (P0) Multi-record handshake reassembly.** Done. `aegiuw_core::reassemble_handshake(records: &[u8]) -> Option<Vec<u8>>` walks consecutive `content_type=22` TLS records, concatenates their fragment payloads, and returns the handshake byte stream truncated to the first complete handshake message. Reassembly is bounded by `MAX_HANDSHAKE_BYTES = 64 KiB` to refuse adversarial `u24 length = 0xFFFFFF` claims. Mixed-content-type streams return `None` (caller surfaces `SniOutcome::Malformed`) — defeats the Traefik `GHSA-wvvq-wgcr-9q48` class. `extract_sni` now routes record bytes → reassemble → `parse_handshake_message` (also public, for QUIC reuse). 8 new tests including a `1-byte-per-record` worst-case (the kubernetes ingress-nginx pattern) and an `app-data smuggled mid-handshake` adversarial case.
 
 - **C2 (P0) Document the `extract_sni` contract.** Done. The module-level docs in `crates/aegiuw-core/src/sni.rs` now carry an explicit **Contract** section listing input expectations (no streaming, bytes past the first complete handshake are ignored), output guarantees (total function, allocation-bounded, panic-free, side-effect free), performance budget (≤ 1.5 ms per PRD §1.1, linear in input length), and Non-goals (DTLS, SSL 2.0, mid-session renegotiation, ECH inner decryption, hostname normalization). All three public functions (`extract_sni`, `reassemble_handshake`, `parse_handshake_message`) carry runnable `# Examples` doc-tests that pin the boundary cases (empty input, wrong content type, truncated record, wrong handshake type) — these execute as part of `cargo test --workspace`, so the contract is enforced, not just described. *Note:* the original backlog wording ("assumes a single complete handshake message in input") was authored pre-C1 and is now obsolete; the executable contract above supersedes it.
