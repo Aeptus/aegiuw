@@ -314,6 +314,115 @@ pub struct ClientHelloMetadata<'a> {
     pub key_share_present: bool,
 }
 
+/// Classified ALPN protocol identifier (SNI backlog A2).
+///
+/// Layer 2 (the local risk engine) needs to ask "is this an HTTP/3 client?",
+/// "is this HTTP/2?" etc. without comparing byte strings everywhere. This
+/// enum collapses the IANA ALPN registry to the five buckets that drive our
+/// routing decisions; everything else lands in [`AlpnProtocol::Other`].
+///
+/// Variants are intentionally narrow — adding a bucket here is a
+/// public-API change and downstream telemetry dimensions
+/// ([`AlpnProtocol::kind`]) would change with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlpnProtocol {
+    /// `http/1.0` — RFC 1945. Vanishingly rare in 2026 but in the registry.
+    Http10,
+    /// `http/1.1` — RFC 9112.
+    Http11,
+    /// `h2` — HTTP/2 over TLS, RFC 7540 (now RFC 9113).
+    Http2,
+    /// `h3` or any draft variant (`h3-29`, `h3-32`, …) — HTTP/3 over QUIC,
+    /// RFC 9114. The `h3-NN` prefix is matched because draft codepoints
+    /// remained in real-world ClientHellos for years after RFC 9114.
+    Http3,
+    /// Anything not in the HTTP family — DNS-over-TLS (`dot`), DNS-over-QUIC
+    /// (`doq`), `acme-tls/1`, `mqtt`, `webrtc`, GREASE-pad strings, unknown.
+    Other,
+}
+
+impl AlpnProtocol {
+    /// Classify a single ALPN protocol identifier from its wire bytes
+    /// (e.g. `b"h2"`, `b"http/1.1"`, `b"h3-29"`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aegiuw_core::AlpnProtocol;
+    ///
+    /// assert_eq!(AlpnProtocol::from_wire(b"h2"), AlpnProtocol::Http2);
+    /// assert_eq!(AlpnProtocol::from_wire(b"h3"), AlpnProtocol::Http3);
+    /// assert_eq!(AlpnProtocol::from_wire(b"h3-29"), AlpnProtocol::Http3);
+    /// assert_eq!(AlpnProtocol::from_wire(b"http/1.1"), AlpnProtocol::Http11);
+    /// assert_eq!(AlpnProtocol::from_wire(b"acme-tls/1"), AlpnProtocol::Other);
+    /// ```
+    pub fn from_wire(value: &[u8]) -> Self {
+        match value {
+            b"http/1.0" => Self::Http10,
+            b"http/1.1" => Self::Http11,
+            b"h2" => Self::Http2,
+            b"h3" => Self::Http3,
+            // h3-NN draft codepoints (e.g. h3-29 through h3-34 saw real deployment).
+            // `h3-` is the prefix we look for; anything past it is treated as a draft.
+            v if v.starts_with(b"h3-") => Self::Http3,
+            _ => Self::Other,
+        }
+    }
+
+    /// Stable lowercase string for telemetry dimensions (mirrors the
+    /// `serde(rename_all = "snake_case")` shape). Matches the
+    /// [`SniOutcome::kind`] / O2 pattern so dashboards across the codebase
+    /// share a label convention.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Http10 => "http_1_0",
+            Self::Http11 => "http_1_1",
+            Self::Http2 => "http_2",
+            Self::Http3 => "http_3",
+            Self::Other => "other",
+        }
+    }
+
+    /// `true` for any classified HTTP variant. Useful when Layer 2 only
+    /// cares whether the connection is HTTP at all (vs. a non-HTTP protocol
+    /// like DNS-over-TLS).
+    pub fn is_http(&self) -> bool {
+        !matches!(self, Self::Other)
+    }
+}
+
+impl ClientHelloMetadata<'_> {
+    /// Classify every offered ALPN protocol in wire order (the client's
+    /// preference order). Returns `None` if the ALPN extension was absent
+    /// (caller can interpret as "client expressed no preference"). Returns
+    /// `Some(empty)` only if the extension was present with an empty list —
+    /// the strictness layer would have rejected that already (RFC 7301
+    /// §3.1 forbids empty `ProtocolName`), so callers won't see it.
+    ///
+    /// SNI backlog A2.
+    pub fn alpn_classified(&self) -> Option<Vec<AlpnProtocol>> {
+        self.alpn_protocols
+            .as_ref()
+            .map(|protos| protos.iter().map(|p| AlpnProtocol::from_wire(p)).collect())
+    }
+
+    /// `true` if the client offered the given ALPN protocol class. Common
+    /// queries: `meta.offers(AlpnProtocol::Http3)` for "did they ask for
+    /// QUIC?", `meta.offers(AlpnProtocol::Http2)` for "is this an h2
+    /// client?".
+    ///
+    /// Returns `false` when the ALPN extension was absent.
+    ///
+    /// SNI backlog A2.
+    pub fn offers(&self, proto: AlpnProtocol) -> bool {
+        match &self.alpn_protocols {
+            None => false,
+            Some(protos) => protos.iter().any(|p| AlpnProtocol::from_wire(p) == proto),
+        }
+    }
+}
+
 /// Parse the supplied bytes as a TLS ClientHello and report what was observed
 /// about the Server Name Indication.
 ///
@@ -2725,6 +2834,110 @@ mod tests {
             };
             assert_eq!(extract_sni(bytes), projected, "input len={}", bytes.len());
         }
+    }
+
+    // ── A2: AlpnProtocol classification ──────────────────────────────────────
+
+    #[test]
+    fn alpn_protocol_classifies_the_well_known_wire_values() {
+        assert_eq!(AlpnProtocol::from_wire(b"http/1.0"), AlpnProtocol::Http10);
+        assert_eq!(AlpnProtocol::from_wire(b"http/1.1"), AlpnProtocol::Http11);
+        assert_eq!(AlpnProtocol::from_wire(b"h2"), AlpnProtocol::Http2);
+        assert_eq!(AlpnProtocol::from_wire(b"h3"), AlpnProtocol::Http3);
+        // RFC 9114 was preceded by a long line of draft codepoints. We saw
+        // h3-23, h3-25, h3-27, h3-29, h3-32 deployed in real-world clients
+        // for years — the prefix match must classify them as Http3.
+        assert_eq!(AlpnProtocol::from_wire(b"h3-29"), AlpnProtocol::Http3);
+        assert_eq!(AlpnProtocol::from_wire(b"h3-32"), AlpnProtocol::Http3);
+        // Non-HTTP and unknown values land in Other.
+        assert_eq!(AlpnProtocol::from_wire(b"acme-tls/1"), AlpnProtocol::Other);
+        assert_eq!(AlpnProtocol::from_wire(b"dot"), AlpnProtocol::Other);
+        assert_eq!(AlpnProtocol::from_wire(b"doq"), AlpnProtocol::Other);
+        assert_eq!(AlpnProtocol::from_wire(b""), AlpnProtocol::Other);
+        // h3 prefix without the trailing draft suffix isn't `h3-` — must not
+        // false-positive on something like `h3foo`.
+        assert_eq!(AlpnProtocol::from_wire(b"h3foo"), AlpnProtocol::Other);
+        assert_eq!(AlpnProtocol::from_wire(b"h2c"), AlpnProtocol::Other);
+    }
+
+    #[test]
+    fn alpn_protocol_kind_strings_are_stable_snake_case() {
+        // O2-style stable telemetry labels: any change here breaks
+        // dashboards / aggregation pipelines downstream, so pin every one.
+        assert_eq!(AlpnProtocol::Http10.kind(), "http_1_0");
+        assert_eq!(AlpnProtocol::Http11.kind(), "http_1_1");
+        assert_eq!(AlpnProtocol::Http2.kind(), "http_2");
+        assert_eq!(AlpnProtocol::Http3.kind(), "http_3");
+        assert_eq!(AlpnProtocol::Other.kind(), "other");
+    }
+
+    #[test]
+    fn alpn_protocol_is_http_excludes_other_only() {
+        assert!(AlpnProtocol::Http10.is_http());
+        assert!(AlpnProtocol::Http11.is_http());
+        assert!(AlpnProtocol::Http2.is_http());
+        assert!(AlpnProtocol::Http3.is_http());
+        assert!(!AlpnProtocol::Other.is_http());
+    }
+
+    #[test]
+    fn alpn_classified_preserves_wire_order() {
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("example.com"));
+        // Client preference order: h3 > h2 > http/1.1. Pin that classified
+        // output is in the same order so a "first acceptable" downstream
+        // selector still picks correctly.
+        exts.extend_from_slice(&build_alpn_extension(&[b"h3", b"h2", b"http/1.1"]));
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert_eq!(
+            meta.alpn_classified().as_deref(),
+            Some(
+                &[
+                    AlpnProtocol::Http3,
+                    AlpnProtocol::Http2,
+                    AlpnProtocol::Http11
+                ][..]
+            ),
+        );
+    }
+
+    #[test]
+    fn alpn_classified_is_none_when_extension_absent() {
+        let bytes = build_client_hello(&build_sni_extension("example.com"));
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(meta.alpn_classified().is_none());
+        // And offers() returns false in that case — no preference expressed.
+        assert!(!meta.offers(AlpnProtocol::Http2));
+        assert!(!meta.offers(AlpnProtocol::Http3));
+    }
+
+    #[test]
+    fn offers_returns_true_for_each_advertised_protocol() {
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("example.com"));
+        exts.extend_from_slice(&build_alpn_extension(&[b"h2", b"http/1.1"]));
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(meta.offers(AlpnProtocol::Http2));
+        assert!(meta.offers(AlpnProtocol::Http11));
+        assert!(!meta.offers(AlpnProtocol::Http3));
+        assert!(!meta.offers(AlpnProtocol::Http10));
+        assert!(!meta.offers(AlpnProtocol::Other));
+    }
+
+    #[test]
+    fn offers_recognises_h3_draft_codepoints_as_http3() {
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("example.com"));
+        // Real-world client that offers only a draft h3 codepoint.
+        exts.extend_from_slice(&build_alpn_extension(&[b"h3-29"]));
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(
+            meta.offers(AlpnProtocol::Http3),
+            "draft h3-29 must classify as Http3",
+        );
     }
 
     #[test]

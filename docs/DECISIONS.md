@@ -252,6 +252,24 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **A2 (P1) ALPN classification — `AlpnProtocol` enum + helpers.** Done. Added `pub enum AlpnProtocol { Http10, Http11, Http2, Http3, Other }` with three associated methods and two helpers on `ClientHelloMetadata`. Layer 2 can now ask "did the client offer HTTP/3?" without comparing byte strings.
+
+  **New public surface:**
+  - `pub enum AlpnProtocol` (`#[derive(Serialize, Deserialize)]` with `rename_all = "snake_case"`).
+  - `AlpnProtocol::from_wire(value: &[u8]) -> Self` — exact match on `http/1.0`, `http/1.1`, `h2`, `h3`, plus a `h3-` prefix match for IETF draft codepoints (h3-29, h3-32, etc. — these stayed in real deployments for years after RFC 9114).
+  - `AlpnProtocol::kind() -> &'static str` — stable lowercase telemetry labels: `http_1_0`, `http_1_1`, `http_2`, `http_3`, `other` (mirrors the O2 pattern from `SniOutcome::kind()` so dashboards across the codebase share one label convention).
+  - `AlpnProtocol::is_http() -> bool` — true for everything except `Other`. Useful when Layer 2 only cares "is this HTTP at all" vs DNS-over-TLS, MQTT, ACME-TLS, etc.
+  - `ClientHelloMetadata::alpn_classified() -> Option<Vec<AlpnProtocol>>` — classify every offered protocol in wire order. Returns `None` if the ALPN extension was absent (client expressed no preference). Empty list is unreachable (A1 strictness rejects an empty `ProtocolName` per RFC 7301 §3.1).
+  - `ClientHelloMetadata::offers(AlpnProtocol) -> bool` — the common single-protocol query (`meta.offers(AlpnProtocol::Http3)` etc.).
+
+  **Negative classifications pinned:** `h2c` → Other (HTTP/2 cleartext doesn't appear in TLS ALPN but pinning the rejection prevents accidental conflation), `h3foo` → Other (prefix match must require the `-` separator), `acme-tls/1` / `dot` / `doq` → Other, empty bytes → Other.
+
+  **Wire-order preservation pinned** by `alpn_classified_preserves_wire_order`: client preference order survives the classification round-trip, so any downstream "first acceptable" selector picks the same one the client preferred.
+
+  **No new allocations on the hot path.** `alpn_classified` allocates one `Vec<AlpnProtocol>` (small, typically 1–4 entries) and `offers` allocates nothing — it walks `Vec<Cow<[u8]>>` and classifies on the fly. Bench numbers unchanged.
+
+  **128 tests pass** (was 120 — added 7 unit tests + 1 doctest on `AlpnProtocol::from_wire`). Clippy clean for std `--all-targets` and `--no-default-features --lib`.
+
 - **A1 (P1) `parse_client_hello_full` + `ClientHelloMetadata`.** Done. Added a full-metadata parser entry point and refactored `extract_sni` and `parse_handshake_message` into thin projections over it.
 
   **New public surface:**
