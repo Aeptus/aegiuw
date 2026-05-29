@@ -12,6 +12,14 @@ rust-version.workspace = true
 unsafe_code = "forbid"
 
 [features]
+# SNI backlog P6: `std` is default-on for the daemon and any other host-OS
+# consumer. Disable it (`--no-default-features`) to compile against
+# `core + alloc` only — used for WASM-on-Worker builds where smaller bundle
+# size and a leaner runtime are preferred. Disabling `std` drops the
+# `duration_us` field from the `extract_sni` trace event (Instant is
+# std-only); everything else stays available.
+default = ["std"]
+std = []
 # SNI backlog O4: when enabled, the parser emits a `tracing::debug!` event
 # with a hex dump of the first 64 bytes of any `Malformed` input. Off by
 # default — opt-in for forensic analysis runs because Malformed bytes are
@@ -20,11 +28,16 @@ unsafe_code = "forbid"
 debug-malformed = []
 
 [dependencies]
-serde = { workspace = true }
+# serde with no_std-compatible defaults so the crate compiles under
+# `--no-default-features` (P6). The `alloc` feature pulls in serde's
+# `String`/`Vec` impls; the `derive` macro is unchanged. Re-enable serde's
+# `std` impls implicitly via our own `std` feature if a downstream needs
+# them (the macros work either way for our SniOutcome shape).
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 # Structured observability for the SNI parser (SNI backlog O1). `tracing` is
 # the de-facto Rust observability framework; emitting events here lets the
 # daemon's Layer-1 subscriber pick them up without coupling the parser to
-# any specific exporter.
+# any specific exporter. `default-features = false` keeps it no_std-compatible.
 tracing = { version = "0.1", default-features = false }
 
 [dev-dependencies]

@@ -8,6 +8,8 @@
 //! the PPID is the daemon's job (it's platform-specific I/O); this module only
 //! makes the pure classification decision from a process name.
 
+use alloc::string::ToString;
+
 use crate::risk::RiskSignal;
 
 /// The category of application that originated a web request.

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+#![cfg_attr(not(feature = "std"), no_std)]
 //! # aegiuw-core
 //!
 //! The pure decision logic of the Aegiuw local agent. Everything here is free of
@@ -13,6 +14,15 @@
 //! The agent flow is: parse the SNI host from a TLS ClientHello ([`sni`]), gather
 //! [`heuristics`] signals about it, and fold those signals into a single
 //! [`risk::Verdict`] that decides Native Path vs. Isolate Path (PRD §1.1).
+//!
+//! ## no_std support (SNI backlog P6)
+//!
+//! Default features include `std`. Pass `--no-default-features` to compile
+//! against `core + alloc` only — the parser keeps full functionality; only the
+//! `duration_us` field on the `extract_sni` trace event is dropped because
+//! `std::time::Instant` is std-only.
+
+extern crate alloc;
 
 pub mod heuristics;
 pub mod risk;

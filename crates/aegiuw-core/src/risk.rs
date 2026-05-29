@@ -3,6 +3,9 @@
 //! Risk verdicts: the data model that every heuristic feeds into, and the policy
 //! that folds a set of signals into one decision.
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use serde::{Deserialize, Serialize};
 
 /// How dangerous a domain looks, from least to most severe.

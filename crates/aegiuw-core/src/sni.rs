@@ -133,7 +133,12 @@
 //!   of the Layer 1 "normalize + enrich" step, not this parser. We
 //!   report `Cleartext { host }` verbatim from the wire.
 
-use std::net::IpAddr;
+// P6: `core::net::IpAddr` is stable since Rust 1.77; we are on 1.82 so the
+// no_std swap is free. `alloc` brings `String`/`Vec` for the few places we
+// allocate (multi-record reassembly buffer, host string, hex preview).
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
@@ -269,16 +274,28 @@ pub fn extract_sni(bytes: &[u8]) -> SniOutcome {
     //   duration_us: u64, wall-clock microseconds (matches PRD §1.1's
     //                ≤ 1.5 ms = ≤ 1500 µs budget — downstream histograms
     //                should bucket near {50, 100, 250, 500, 1000, 1500, 2500}).
+    // P6: Instant is std-only; under `--no-default-features` we drop the
+    // duration_us field but keep the rest of the trace event so downstream
+    // counts and outcome dimensions still work.
+    #[cfg(feature = "std")]
     let start = std::time::Instant::now();
     let outcome = match reassemble_handshake(bytes) {
         Some(handshake) => parse_handshake_message(&handshake).unwrap_or(SniOutcome::Malformed),
         None => SniOutcome::Malformed,
     };
+    #[cfg(feature = "std")]
     tracing::trace!(
         target: "aegiuw_core::sni",
         outcome = outcome.kind(),
         byte_count = bytes.len(),
         duration_us = start.elapsed().as_micros() as u64,
+        "extract_sni"
+    );
+    #[cfg(not(feature = "std"))]
+    tracing::trace!(
+        target: "aegiuw_core::sni",
+        outcome = outcome.kind(),
+        byte_count = bytes.len(),
         "extract_sni"
     );
     // O4: under the `debug-malformed` feature flag, emit a hex dump of the
@@ -298,7 +315,7 @@ pub fn extract_sni(bytes: &[u8]) -> SniOutcome {
 
 #[cfg(feature = "debug-malformed")]
 fn malformed_hex_preview(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
+    use core::fmt::Write as _;
     let mut out = String::with_capacity(64 * 3);
     for &b in bytes.iter().take(64) {
         // Single-pass `write!` into a String can't fail.

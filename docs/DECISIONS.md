@@ -294,6 +294,17 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 - **S1 (P0) `cargo-fuzz` harness on the SNI parser.** Done. Added `crates/aegiuw-core/fuzz/` as a separate sub-crate (excluded from the workspace via `[workspace] exclude = ["crates/aegiuw-core/fuzz"]` because `cargo-fuzz` requires the nightly toolchain and pulls in `libfuzzer-sys`; the main workspace stays stable-only). Three fuzz targets cover the three public entry points: `extract_sni` (primary — exercises the whole record → handshake → SNI pipeline), `reassemble_handshake` (focused signal on the `MAX_HANDSHAKE_BYTES` allocation cap), and `parse_handshake_message` (the post-reassembly walker, which the QUIC parser will reuse directly). libFuzzer's defaults give us the four guarantees the C2 contract promised: panic-free (any panic aborts and writes a reproducer), no OOB reads (AddressSanitizer, default in `cargo fuzz` builds), bounded time (`-timeout=1` kills runs > 1 s), and bounded allocation (the 64 KiB reassembly cap holds against attacker-crafted u24 length claims). **Not registered as a default quality gate** — fuzzing is open-ended and contributors shouldn't be forced to install `cargo-fuzz` to pass `quality:staged`. The right rhythm is periodic manual runs (pre-release, post-refactor). Full runbook including "what to do on a crash" lives in `crates/aegiuw-core/fuzz/README.md`.
 
+- **P6 (P3) `no_std` + `alloc` support.** Done. Added `[features] default = ["std"]; std = []` to `aegiuw-core/Cargo.toml`; the crate now compiles cleanly under both `cargo build -p aegiuw-core` (std, default) and `cargo build -p aegiuw-core --no-default-features` (core + alloc only). Concrete swaps:
+  - `std::net::IpAddr` → `core::net::IpAddr` (stable since Rust 1.77; we're on 1.82).
+  - `std::fmt::Write` → `core::fmt::Write` in `malformed_hex_preview`.
+  - `std::mem::swap` → `core::mem::swap` in the Levenshtein two-row loop.
+  - `String`, `Vec`, `ToString`, `vec!` imported explicitly from `alloc::{string, vec}` everywhere they're used (sni.rs, risk.rs, both heuristic submodules).
+  - `serde` switched to `default-features = false, features = ["derive", "alloc"]` so the existing `#[derive(Serialize, Deserialize)]` impls keep working without pulling in serde's std impls.
+  - `tracing` was already `default-features = false`.
+  - The single `std::time::Instant` use in `extract_sni` (for the `duration_us` field on the trace event, O1/O3) is `#[cfg(feature = "std")]`-gated. Under no_std the trace event still fires with `outcome` and `byte_count`, just without the duration.
+
+  Rationale: the Worker (`aegiuw-router`) currently runs as TypeScript-on-V8, but a future migration to Rust-compiled-to-WASM would benefit from a no_std core (smaller bundles, faster cold-start, no need to bring in std's panic-handler or allocator wrappers). Building this support *now* — while the parser is small and well-tested — is much cheaper than retrofitting later. The 112-test suite passes under both feature sets; clippy is clean for both `--all-targets` (std) and `--no-default-features --lib` (no_std).
+
 - **P5 (P3) SIMD evaluation.** Deferred with rationale. The SNI backlog flagged SIMD as "almost certainly overkill" and P4's measurements confirm it: a single core sustains ~9.7M parses/sec and our worst-case path is ~145 ns. SIMD would target three hot loops in the parser:
   - the `read_u16`/`read_u24` big-endian decodes,
   - the host-bytes UTF-8 validation (`std::str::from_utf8`), and

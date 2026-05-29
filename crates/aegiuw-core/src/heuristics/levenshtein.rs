@@ -6,6 +6,10 @@
 //! distance to a brand the user did *not* actually intend to visit
 //! (`micr0soft.com` vs `microsoft.com`) is a classic phishing tell.
 
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use crate::risk::RiskSignal;
 
 /// Compute the Levenshtein edit distance between two strings, measured in Unicode
@@ -37,7 +41,7 @@ pub fn distance(a: &str, b: &str) -> usize {
                 .min(curr[j] + 1) // insertion
                 .min(prev[j] + cost); // substitution
         }
-        std::mem::swap(&mut prev, &mut curr);
+        core::mem::swap(&mut prev, &mut curr);
     }
 
     prev[b.len()]
