@@ -797,21 +797,29 @@ pub(crate) struct Cursor<'a> {
     pos: usize,
 }
 
+// P2: `#[inline]` on every Cursor accessor — they're all single-expression
+// readers and the parse loop calls them tens of times per ClientHello. Letting
+// the compiler inline across crate boundaries removes the call overhead and
+// lets the bounds checks fuse with adjacent ones.
 impl<'a> Cursor<'a> {
+    #[inline]
     pub(crate) fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, pos: 0 }
     }
 
+    #[inline]
     pub(crate) fn remaining(&self) -> usize {
         self.bytes.len().saturating_sub(self.pos)
     }
 
+    #[inline]
     pub(crate) fn read_u8(&mut self) -> Option<u8> {
         let b = *self.bytes.get(self.pos)?;
         self.pos += 1;
         Some(b)
     }
 
+    #[inline]
     pub(crate) fn read_u16(&mut self) -> Option<u16> {
         let s = self.read_slice(2)?;
         let bytes: [u8; 2] = s.try_into().ok()?;
@@ -819,12 +827,14 @@ impl<'a> Cursor<'a> {
     }
 
     /// 24-bit big-endian length, used by the TLS Handshake header.
+    #[inline]
     pub(crate) fn read_u24(&mut self) -> Option<u32> {
         let s = self.read_slice(3)?;
         let &[a, b, c] = s else { return None };
         Some(((a as u32) << 16) | ((b as u32) << 8) | (c as u32))
     }
 
+    #[inline]
     pub(crate) fn read_slice(&mut self, n: usize) -> Option<&'a [u8]> {
         let end = self.pos.checked_add(n)?;
         let s = self.bytes.get(self.pos..end)?;
@@ -834,6 +844,7 @@ impl<'a> Cursor<'a> {
 
     /// Read a `u8`-prefixed length, then that many bytes (e.g. session_id,
     /// compression_methods).
+    #[inline]
     pub(crate) fn read_u8_prefixed(&mut self) -> Option<&'a [u8]> {
         let n = self.read_u8()? as usize;
         self.read_slice(n)
@@ -841,6 +852,7 @@ impl<'a> Cursor<'a> {
 
     /// Read a `u16`-prefixed length, then that many bytes (e.g. cipher_suites,
     /// extensions, individual extension data).
+    #[inline]
     pub(crate) fn read_u16_prefixed(&mut self) -> Option<&'a [u8]> {
         let n = self.read_u16()? as usize;
         self.read_slice(n)
