@@ -166,6 +166,12 @@ pub const EXT_ALPN: u16 = 0x0010;
 /// Surfaces in [`ClientHelloMetadata::supported_versions`] (SNI backlog A1).
 pub const EXT_SUPPORTED_VERSIONS: u16 = 0x002b;
 
+/// Extension type for `early_data` (RFC 8446 §4.2.10). When present in a
+/// ClientHello, signals that the client is sending 0-RTT data with the
+/// PSK it's offering for resumption. Implies (but does not require us to
+/// check) that `pre_shared_key` is also present. SNI backlog A6.
+pub const EXT_EARLY_DATA: u16 = 0x002a;
+
 /// Extension type for `key_share` (RFC 8446 §4.2.8). We parse the NamedGroup
 /// IDs from the client_shares list (skipping the key_exchange bytes — we
 /// don't need the actual public keys) so Layer 2 can fingerprint
@@ -331,6 +337,19 @@ pub struct ClientHelloMetadata<'a> {
     /// presence flag is the only signal Layer 2 needs and the body is
     /// opaque to anyone but the resuming server. SNI backlog A5.
     pub psk_present: bool,
+    /// `true` if an `early_data` extension (RFC 8446 §4.2.10) was present.
+    /// Signals 0-RTT data is in flight — the client is sending application
+    /// data alongside the ClientHello, encrypted under the PSK it's
+    /// offering. Implies [`psk_present`] is also `true` (the spec ties them
+    /// together), though we don't cross-check: each flag reports what was
+    /// actually observed on the wire.
+    ///
+    /// Useful Layer-2 input because 0-RTT carries forward-secrecy and
+    /// replay-protection trade-offs that policy may want to flag.
+    /// SNI backlog A6.
+    ///
+    /// [`psk_present`]: ClientHelloMetadata::psk_present
+    pub early_data_present: bool,
 }
 
 /// Classified ALPN protocol identifier (SNI backlog A2).
@@ -1119,6 +1138,7 @@ pub fn parse_handshake_message_full(handshake: &[u8]) -> Option<ClientHelloMetad
         supported_versions: None,
         key_share_groups: None,
         psk_present: false,
+        early_data_present: false,
     };
     // P1: host borrows from the input `handshake` slice; no allocation.
     let mut sni_host: Option<&str> = None;
@@ -1189,6 +1209,9 @@ pub fn parse_handshake_message_full(handshake: &[u8]) -> Option<ClientHelloMetad
             }
             EXT_KEY_SHARE => {
                 meta.key_share_groups = Some(parse_key_share_extension(ext_data)?);
+            }
+            EXT_EARLY_DATA => {
+                meta.early_data_present = true;
             }
             _ => {}
         }
@@ -1284,6 +1307,7 @@ pub fn parse_client_hello_full(bytes: &[u8]) -> Option<ClientHelloMetadata<'_>> 
                 supported_versions: borrowed.supported_versions,
                 key_share_groups: borrowed.key_share_groups,
                 psk_present: borrowed.psk_present,
+                early_data_present: borrowed.early_data_present,
             })
         }
     }
@@ -3566,6 +3590,45 @@ mod tests {
         let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
         assert!(meta.psk_present);
         assert!(meta.host.is_none());
+    }
+
+    // ── A6: early_data presence (0-RTT in flight) ────────────────────────────
+
+    #[test]
+    fn early_data_present_true_when_extension_seen() {
+        // Realistic 0-RTT ClientHello shape: SNI, PSK, early_data (PSK must
+        // still be last per C11, so early_data goes before PSK).
+        let mut exts = build_sni_extension("example.com");
+        // Empty extension body — RFC 8446 §4.2.10 specifies an empty
+        // extension_data for the client-side early_data.
+        exts.extend_from_slice(&build_extension(EXT_EARLY_DATA, &[]));
+        exts.extend_from_slice(&build_psk_extension());
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(meta.early_data_present);
+        // PSK should also be flagged (the two travel together in practice).
+        assert!(meta.psk_present);
+        // And SNI extraction unaffected.
+        assert_eq!(meta.host.as_deref(), Some("example.com"));
+    }
+
+    #[test]
+    fn early_data_present_false_when_extension_absent() {
+        let bytes = build_client_hello(&build_sni_extension("example.com"));
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(!meta.early_data_present);
+    }
+
+    #[test]
+    fn early_data_independent_from_psk_signal_when_psk_absent() {
+        // Pathological: early_data sent without PSK. The spec ties them but
+        // the parser reports what's on the wire — each flag independent.
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&build_extension(EXT_EARLY_DATA, &[]));
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(meta.early_data_present);
+        assert!(!meta.psk_present, "PSK absent => psk_present stays false");
     }
 
     #[test]

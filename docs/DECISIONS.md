@@ -252,6 +252,14 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **A6 (P2) Expose `early_data` presence (0-RTT in flight).** Done. Added `pub const EXT_EARLY_DATA: u16 = 0x002a` (RFC 8446 §4.2.10) and `pub early_data_present: bool` on `ClientHelloMetadata`. Signals that the client is sending 0-RTT data alongside the ClientHello, encrypted under the PSK it's offering for resumption.
+
+  **Why Layer 2 wants this signal:** 0-RTT has documented forward-secrecy and replay-protection trade-offs (RFC 8446 §8). Policy may want to flag 0-RTT-bearing connections — e.g. require user confirmation for endpoints where replay risk is unacceptable.
+
+  **Spec-implied invariant intentionally not enforced:** RFC 8446 requires `pre_shared_key` whenever `early_data` is in a ClientHello (otherwise there's no key to encrypt the 0-RTT data with). We don't cross-check the two flags — each reports what was actually observed on the wire, so a pathological "early_data without PSK" still surfaces both flags independently. Pinned by `early_data_independent_from_psk_signal_when_psk_absent`.
+
+  **Tests:** 3 new — realistic 0-RTT CH (SNI + early_data + PSK-last), absent, and the pathological PSK-absent case. 156 tests pass (was 153). Clippy clean both feature sets.
+
 - **A5 (P2) Expose PSK presence on `ClientHelloMetadata`.** Done. Added `psk_present: bool` to `ClientHelloMetadata`. PSK in a ClientHello is the TLS 1.3 session-resumption signal — a returning client offering a previously-issued ticket so the server can short-circuit the full handshake. Useful Layer-2 input: a PSK-resuming client likely already passed our allow-list on the original handshake.
 
   **Implementation:** trivial — we already detect `EXT_PRE_SHARED_KEY` for the C11 "PSK must be last" rule. The A5 commit just lifts that detection (`psk_seen`) onto the public struct (`meta.psk_present`). No new parser code.
