@@ -252,6 +252,8 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **T7 (P2) Coalesced-records fixture.** Done. 2 tests pinning: (a) one complete handshake + partial trailing record bytes — trailing bytes are ignored (the parser's "first complete handshake wins" contract from `reassemble_handshake` docs); (b) two records carrying one handshake (the canonical fragmentation case, named T7 so the test plan landing page finds an obvious fixture). 244 tests pass (was 242). Clippy clean.
+
 - **T6 (P1) Malformed-corpus truncation sweep.** Done. 3 tests that walk every byte-prefix of known-good ClientHellos and assert `extract_sni` / `parse_client_hello_full` never panic, never read OOB, and always return a stable `SniOutcome::kind()`.
 
   **Why this complements S2 (proptest):** S2 random-walks the input space looking for panics; T6 is its deterministic complement. Proptest occasionally misses long-running prefixes that linear truncation hits every time, and proptest's shrinking doesn't always cover the maximum-length tail.

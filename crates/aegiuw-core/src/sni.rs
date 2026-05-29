@@ -3700,6 +3700,48 @@ mod tests {
         }
     }
 
+    // ── T7: Coalesced records (multiple records in one input slice) ──────────
+    //
+    // TCP delivers records concatenated in one buffer when the kernel
+    // coalesces back-to-back writes. T1's fragmentation tests already
+    // exercise the case where one handshake is *split* across records.
+    // T7 pins the complementary case: bytes past the end of the first
+    // complete handshake are *ignored* (a partial second handshake in the
+    // same buffer must not bleed into the first parse).
+
+    #[test]
+    fn t7_coalesced_complete_handshake_plus_trailing_record_bytes() {
+        let handshake = build_handshake_message(&build_sni_extension("example.com"));
+        let mut input = wrap_record(CONTENT_TYPE_HANDSHAKE, &handshake);
+        // Append the start of a second record (a partial handshake byte). The
+        // parser must ignore it — the first handshake completes within record 1.
+        input.extend_from_slice(&[CONTENT_TYPE_HANDSHAKE, 0x03, 0x01, 0x00, 0x05]);
+        input.extend_from_slice(&[0x01, 0x00, 0x00, 0x01, 0xFF]);
+        assert_eq!(
+            extract_sni(&input),
+            SniOutcome::Cleartext {
+                host: "example.com".into()
+            },
+        );
+    }
+
+    #[test]
+    fn t7_coalesced_two_records_one_handshake_extracts_sni() {
+        // Two records, one handshake split between them — the canonical
+        // coalesced case. Pinned here too even though T1's sweep covers
+        // mid-split exhaustively, so a search for "T7" lands on a clearly-
+        // labelled fixture for the test plan.
+        let handshake = build_handshake_message(&build_sni_extension("example.com"));
+        let split = 4 + 2 + 16; // arbitrary mid-position
+        let records = build_fragmented_records(&handshake, &[split]);
+        assert_eq!(
+            extract_sni(&records),
+            SniOutcome::Cleartext {
+                host: "example.com".into()
+            },
+        );
+    }
+
     // ── Trailing-bytes tolerance (C9, RFC 8446 §4) ───────────────────────────
 
     /// Local fixture: build a ClientHello whose handshake body has extra bytes
