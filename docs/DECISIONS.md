@@ -252,6 +252,12 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **A9 (P3) Expose `signature_algorithms` (RFC 8446 §4.2.3).** Done. Added `pub const EXT_SIGNATURE_ALGORITHMS: u16 = 0x000d` and `pub signature_algorithms: Option<Vec<u16>>` on `ClientHelloMetadata`. High-fidelity fingerprint dimension — algorithms and order vary by client/browser version.
+
+  **Shared parser**: introduced `parse_u16_prefixed_u16_list` covering both A9 and A10 (`supported_groups` — same wire shape). RFC strictness: non-empty list, even byte length.
+
+  4 new tests; 168 total (was 164). Clippy clean both feature sets.
+
 - **A8 (P3) Expose `record_size_limit` (RFC 8449).** Done. Added `pub const EXT_RECORD_SIZE_LIMIT: u16 = 0x001c` and `pub record_size_limit: Option<u16>` on `ClientHelloMetadata`. The value is the maximum record-layer payload (bytes) the client is willing to receive. Useful Layer-2 fingerprint dimension and infrastructure-sizing input.
 
   **Strictness:** RFC 8449 §4 mandates the value be in `[64, 2^14 + 1] = [64, 16385]`. Out-of-range values surface as `Malformed` (parser returns `None`) rather than being silently clamped — same failure-closed contract as the rest of the parser. The extension body must be exactly 2 bytes; trailing padding is rejected. Pinned by `record_size_limit_rejects_value_below_64`, `record_size_limit_rejects_value_above_max`, and `record_size_limit_rejects_trailing_bytes`.

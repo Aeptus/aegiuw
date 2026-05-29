@@ -186,6 +186,12 @@ pub const EXT_COMPRESS_CERTIFICATE: u16 = 0x001b;
 /// surface as `Malformed`. SNI backlog A8.
 pub const EXT_RECORD_SIZE_LIMIT: u16 = 0x001c;
 
+/// Extension type for `signature_algorithms` (RFC 8446 §4.2.3). Body is
+/// a `u16`-prefixed list of `u16` SignatureScheme codepoints. Useful as a
+/// fingerprinting input — clients differ in the algorithms and their
+/// order. SNI backlog A9.
+pub const EXT_SIGNATURE_ALGORITHMS: u16 = 0x000d;
+
 /// Extension type for `key_share` (RFC 8446 §4.2.8). We parse the NamedGroup
 /// IDs from the client_shares list (skipping the key_exchange bytes — we
 /// don't need the actual public keys) so Layer 2 can fingerprint
@@ -381,6 +387,13 @@ pub struct ClientHelloMetadata<'a> {
     /// to be in `[64, 2^14 + 1] = [64, 16385]` — our strictness layer
     /// rejects out-of-range values as Malformed. SNI backlog A8.
     pub record_size_limit: Option<u16>,
+    /// The `signature_algorithms` extension (RFC 8446 §4.2.3): the list
+    /// of SignatureScheme codepoints the client offers, in wire order
+    /// (client preference). `None` if the extension was absent.
+    ///
+    /// High-fidelity fingerprint dimension — algorithms and ordering
+    /// vary by client / browser version. SNI backlog A9.
+    pub signature_algorithms: Option<Vec<u16>>,
 }
 
 /// Classified ALPN protocol identifier (SNI backlog A2).
@@ -1172,6 +1185,7 @@ pub fn parse_handshake_message_full(handshake: &[u8]) -> Option<ClientHelloMetad
         early_data_present: false,
         compress_certificate_present: false,
         record_size_limit: None,
+        signature_algorithms: None,
     };
     // P1: host borrows from the input `handshake` slice; no allocation.
     let mut sni_host: Option<&str> = None;
@@ -1251,6 +1265,9 @@ pub fn parse_handshake_message_full(handshake: &[u8]) -> Option<ClientHelloMetad
             }
             EXT_RECORD_SIZE_LIMIT => {
                 meta.record_size_limit = Some(parse_record_size_limit_extension(ext_data)?);
+            }
+            EXT_SIGNATURE_ALGORITHMS => {
+                meta.signature_algorithms = Some(parse_u16_prefixed_u16_list(ext_data)?);
             }
             _ => {}
         }
@@ -1349,6 +1366,7 @@ pub fn parse_client_hello_full(bytes: &[u8]) -> Option<ClientHelloMetadata<'_>> 
                 early_data_present: borrowed.early_data_present,
                 compress_certificate_present: borrowed.compress_certificate_present,
                 record_size_limit: borrowed.record_size_limit,
+                signature_algorithms: borrowed.signature_algorithms,
             })
         }
     }
@@ -1371,6 +1389,26 @@ fn parse_alpn_extension(data: &[u8]) -> Option<Vec<Cow<'_, [u8]>>> {
             return None;
         }
         out.push(Cow::Borrowed(proto));
+    }
+    Some(out)
+}
+
+/// Parse a `u16`-prefixed list of `u16` codepoints. Returns `None` if the
+/// prefix overruns, the list is empty, or the byte length is odd.
+///
+/// Shared by `signature_algorithms` (RFC 8446 §4.2.3, A9) and
+/// `supported_groups` (RFC 8446 §4.2.7, A10) — both have the same wire
+/// shape (`u16`-prefixed list of `u16` codepoints, non-empty by spec).
+fn parse_u16_prefixed_u16_list(data: &[u8]) -> Option<Vec<u16>> {
+    let mut c = Cursor::new(data);
+    let list = c.read_u16_prefixed()?;
+    if list.is_empty() || list.len() % 2 != 0 {
+        return None;
+    }
+    let mut entries = Cursor::new(list);
+    let mut out: Vec<u16> = Vec::with_capacity(list.len() / 2);
+    while entries.remaining() > 0 {
+        out.push(entries.read_u16()?);
     }
     Some(out)
 }
@@ -3784,6 +3822,62 @@ mod tests {
         exts.extend_from_slice(&build_extension(
             EXT_RECORD_SIZE_LIMIT,
             &[0x40, 0x01, 0xFF], // value=16385 + trailing 0xFF
+        ));
+        let bytes = build_client_hello(&exts);
+        assert_eq!(parse_client_hello_full(&bytes), None);
+    }
+
+    // ── A9: signature_algorithms (RFC 8446 §4.2.3) ───────────────────────────
+
+    fn build_signature_algorithms_extension(algs: &[u16]) -> Vec<u8> {
+        let mut list: Vec<u8> = Vec::new();
+        for a in algs {
+            list.extend_from_slice(&a.to_be_bytes());
+        }
+        let mut body = Vec::new();
+        body.extend_from_slice(&(list.len() as u16).to_be_bytes());
+        body.extend_from_slice(&list);
+        build_extension(EXT_SIGNATURE_ALGORITHMS, &body)
+    }
+
+    #[test]
+    fn signature_algorithms_extracted_in_wire_order() {
+        // Realistic modern Chrome offer: ecdsa_secp256r1_sha256 (0x0403),
+        // rsa_pss_rsae_sha256 (0x0804), rsa_pkcs1_sha256 (0x0401).
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&build_signature_algorithms_extension(&[
+            0x0403, 0x0804, 0x0401,
+        ]));
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert_eq!(
+            meta.signature_algorithms.as_deref(),
+            Some(&[0x0403, 0x0804, 0x0401][..]),
+        );
+    }
+
+    #[test]
+    fn signature_algorithms_none_when_absent() {
+        let bytes = build_client_hello(&build_sni_extension("example.com"));
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(meta.signature_algorithms.is_none());
+    }
+
+    #[test]
+    fn signature_algorithms_rejects_empty_list() {
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&build_signature_algorithms_extension(&[]));
+        let bytes = build_client_hello(&exts);
+        assert_eq!(parse_client_hello_full(&bytes), None);
+    }
+
+    #[test]
+    fn signature_algorithms_rejects_odd_byte_length() {
+        // u16 prefix says 3 bytes but each scheme is u16 (2 bytes) — spec violation.
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&build_extension(
+            EXT_SIGNATURE_ALGORITHMS,
+            &[0x00, 0x03, 0x04, 0x03, 0x08],
         ));
         let bytes = build_client_hello(&exts);
         assert_eq!(parse_client_hello_full(&bytes), None);
