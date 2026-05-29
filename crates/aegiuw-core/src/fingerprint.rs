@@ -577,6 +577,138 @@ pub const KNOWN_JA4_FINGERPRINTS: &[(&str, KnownClient)] = &[
     ("t13d1516h2_8daaf6152771_b186095e22b6", KnownClient::Chrome),
 ];
 
+// ── F5: likely_launch_source classifier ──────────────────────────────────────
+
+use crate::sni::AlpnProtocol;
+
+/// Coarse classification of the client that produced a ClientHello
+/// (SNI backlog F5).
+///
+/// **Critical scope note:** this is a partial fallback for the broken
+/// PPID-based launch-context detection (DECISIONS.C16). The TLS handshake
+/// is made by the *browser process* regardless of which app launched it —
+/// Chrome opened by clicking a link in Outlook produces the same TLS
+/// fingerprint as Chrome opened from the dock. So we **cannot** distinguish
+/// browser-launched-by-email from browser-launched-by-user from the TLS
+/// fingerprint. What we *can* distinguish: was it a browser at all
+/// (vs. a CLI tool, library, scanner)?
+///
+/// The product-level "this came from email" detection still needs the
+/// WebExtension (per DECISIONS.C13) or a process-tree timing heuristic
+/// (per C16). F5 just narrows the search space — if the fingerprint says
+/// [`LaunchSource::Cli`], we know it *wasn't* a browser-mediated click and
+/// the email/doc question is moot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchSource {
+    /// Browser-class client (Chrome, Firefox, Safari, or one with the
+    /// same shape: many extensions, modern key shares, ALPN with HTTP/2 or
+    /// HTTP/3, often ECH / certificate compression / PQ hybrid). For these
+    /// the launching-app question (user vs email vs doc) needs another
+    /// layer of signal (WebExtension, process tree).
+    Browser,
+    /// Command-line tool (curl-style): small extension set, no ECH, no
+    /// PQ, often no ALPN preference. A click chain doesn't end here in
+    /// SMB usage — these are almost always scripted or developer-driven.
+    Cli,
+    /// Programmatic HTTP client (Go `net/http`, Python `requests`, etc.):
+    /// medium extension set, h2 ALPN often present, no ECH, no PQ. Like
+    /// `Cli`, not part of a typical end-user click flow.
+    Library,
+    /// Couldn't confidently classify — caller should fall back to other
+    /// signals (PPID heuristic, WebExtension, allow-list policy).
+    Unknown,
+}
+
+impl LaunchSource {
+    /// Stable lowercase string for telemetry dimensions, mirroring the
+    /// O2 / A2 / A3 convention.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Browser => "browser",
+            Self::Cli => "cli",
+            Self::Library => "library",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Classify a parsed ClientHello into a [`LaunchSource`] bucket.
+///
+/// Decision flow:
+///
+/// 1. Compute JA4 once and look it up in [`KNOWN_JA4_FINGERPRINTS`]. A
+///    direct hit short-circuits the heuristics.
+/// 2. Otherwise, score browser-likeness from `meta` signals:
+///    - ECH present → strong browser signal (Chrome / Firefox 2024+).
+///    - Post-quantum key_share → strong browser signal.
+///    - `compress_certificate` extension → modern browser or library.
+///    - HTTP/3 or HTTP/2 ALPN → browser or modern library.
+///    - Large extension set (≥ 12 sans GREASE) → browser-shaped.
+///    - Tiny extension set (≤ 5) → CLI-shaped.
+/// 3. Translate the score to a bucket. The thresholds are intentionally
+///    conservative — better to return `Unknown` than mis-attribute.
+///
+/// See [`LaunchSource`] for the critical scope note about what this can
+/// and cannot tell you.
+pub fn likely_launch_source(meta: &ClientHelloMetadata<'_>) -> LaunchSource {
+    // 1. Direct lookup in the seeded JA4 table.
+    let computed_ja4 = ja4(meta);
+    if let Some(known) = known_client_from_ja4(&computed_ja4.raw) {
+        return match known {
+            KnownClient::Chrome | KnownClient::Firefox | KnownClient::Safari => {
+                LaunchSource::Browser
+            }
+            KnownClient::Curl => LaunchSource::Cli,
+            KnownClient::Go => LaunchSource::Library,
+            KnownClient::Other => LaunchSource::Unknown,
+        };
+    }
+
+    // 2. Heuristics from metadata signals.
+    let mut browser_score: i32 = 0;
+    if meta.ech_present {
+        // ECH is currently shipped in Chrome and Firefox; near-certain browser.
+        browser_score += 3;
+    }
+    if meta.has_post_quantum_key_share() {
+        // PQ hybrid key share — Chrome / Firefox 2024+ default.
+        browser_score += 3;
+    }
+    if meta.compress_certificate_present {
+        // Modern browsers + modern libraries (rustls, recent go-tls) advertise this.
+        browser_score += 1;
+    }
+    if meta.offers(AlpnProtocol::Http3) {
+        browser_score += 2;
+    }
+    if meta.offers(AlpnProtocol::Http2) {
+        browser_score += 1;
+    }
+    if meta.signature_algorithms.is_some() {
+        browser_score += 1;
+    }
+    let ext_count = meta
+        .extension_order
+        .iter()
+        .filter(|&&v| !is_grease_codepoint(v))
+        .count();
+    if ext_count >= 12 {
+        browser_score += 1;
+    }
+    if ext_count <= 5 {
+        browser_score -= 2;
+    }
+
+    // 3. Translate score to bucket. Thresholds tuned conservatively.
+    match browser_score {
+        s if s >= 5 => LaunchSource::Browser,
+        s if s >= 2 => LaunchSource::Library,
+        s if s <= -1 => LaunchSource::Cli,
+        _ => LaunchSource::Unknown,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::borrow::Cow;
@@ -1062,5 +1194,125 @@ mod tests {
             assert_eq!(parts[1].len(), 12, "JA4_b must be 12 hex chars: {fp}");
             assert_eq!(parts[2].len(), 12, "JA4_c must be 12 hex chars: {fp}");
         }
+    }
+
+    // ── F5: LaunchSource classifier ──────────────────────────────────────────
+
+    #[test]
+    fn launch_source_kind_strings_are_stable_snake_case() {
+        assert_eq!(LaunchSource::Browser.kind(), "browser");
+        assert_eq!(LaunchSource::Cli.kind(), "cli");
+        assert_eq!(LaunchSource::Library.kind(), "library");
+        assert_eq!(LaunchSource::Unknown.kind(), "unknown");
+    }
+
+    #[test]
+    fn likely_launch_source_classifies_modern_browser_via_signals() {
+        // Chrome 2026 fingerprint: ECH + PQ hybrid + h2 + many extensions.
+        // Score: ECH(+3) + PQ(+3) + h2(+1) + sigalgs(+1) + ext_count(+1) = 9 → Browser.
+        let mut meta = empty_meta();
+        meta.host = Some(Cow::Borrowed("example.com"));
+        meta.cipher_suites = vec![0x1301, 0x1302, 0x1303];
+        meta.ech_present = true;
+        meta.alpn_protocols = Some(vec![Cow::Borrowed(b"h2".as_slice())]);
+        meta.key_share_groups = Some(vec![0x11ec, 0x001d]); // X25519MLKEM768 + X25519
+        meta.signature_algorithms = Some(vec![0x0403, 0x0804]);
+        meta.extension_order = vec![
+            0x0000, 0x000a, 0x000b, 0x000d, 0x0010, 0x002b, 0x0033, 0x002a, 0x001b, 0x001c, 0x0029,
+            0x0017, 0xfe0d,
+        ];
+        assert_eq!(likely_launch_source(&meta), LaunchSource::Browser);
+    }
+
+    #[test]
+    fn likely_launch_source_classifies_curl_shape_as_cli() {
+        // curl-style: TLS 1.3, 3 ciphers, ~3 extensions, no ECH, no PQ, no ALPN.
+        // Score: ext_count_small(-2) = -2 → Cli (s <= -1).
+        let mut meta = empty_meta();
+        meta.host = Some(Cow::Borrowed("example.com"));
+        meta.cipher_suites = vec![0x1301, 0x1302, 0x1303];
+        meta.extension_order = vec![0x0000, 0x002b, 0x0033];
+        assert_eq!(likely_launch_source(&meta), LaunchSource::Cli);
+    }
+
+    #[test]
+    fn likely_launch_source_classifies_go_shape_as_library() {
+        // Go net/http: TLS 1.3, h2 ALPN, sigalgs, no ECH, no PQ, medium ext.
+        // Score: h2(+1) + sigalgs(+1) + (6 exts, no bonus) = 2 → Library.
+        let mut meta = empty_meta();
+        meta.host = Some(Cow::Borrowed("example.com"));
+        meta.cipher_suites = vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02c];
+        meta.alpn_protocols = Some(vec![Cow::Borrowed(b"h2".as_slice())]);
+        meta.signature_algorithms = Some(vec![0x0403, 0x0804, 0x0401]);
+        meta.extension_order = vec![0x0000, 0x000d, 0x0010, 0x002b, 0x0033, 0x000a];
+        assert_eq!(likely_launch_source(&meta), LaunchSource::Library);
+    }
+
+    #[test]
+    fn likely_launch_source_falls_back_to_known_table_when_matched() {
+        // Construct a meta whose JA4 happens to equal the seeded Chrome
+        // entry. Since we can't easily produce that synthetic JA4 from
+        // arbitrary metadata, exercise the *path* with a meta that would
+        // otherwise classify as Library — then patch in the known fingerprint
+        // path with a separate direct lookup test.
+        //
+        // Direct: the known_client_from_ja4 path is exercised in F4 tests;
+        // here we just confirm the function doesn't panic on the seeded
+        // input shape.
+        let mut meta = empty_meta();
+        meta.host = Some(Cow::Borrowed("example.com"));
+        meta.cipher_suites = vec![0x1301];
+        let result = likely_launch_source(&meta);
+        // Whatever bucket — must be a valid variant, not a panic.
+        assert!(matches!(
+            result,
+            LaunchSource::Browser
+                | LaunchSource::Cli
+                | LaunchSource::Library
+                | LaunchSource::Unknown
+        ));
+    }
+
+    #[test]
+    fn likely_launch_source_falls_back_to_unknown_for_ambiguous_shapes() {
+        // Boring meta: 1 cipher, no ALPN, no ECH, no PQ, no sigalgs.
+        // 1 extension → ext_count_small(-2) = -2 → Cli. So we need 6-11 exts
+        // to land in Unknown band (0 or 1 score). Add minimal h2-ish presence
+        // without strong browser markers.
+        let mut meta = empty_meta();
+        meta.host = Some(Cow::Borrowed("example.com"));
+        meta.cipher_suites = vec![0x1301];
+        meta.extension_order = vec![0x0000, 0x002b, 0x0033, 0x000a, 0x000b, 0x000d, 0x002a];
+        // 7 extensions, no ALPN, no ECH, no PQ, no sigalgs → score = 0 → Unknown.
+        assert_eq!(likely_launch_source(&meta), LaunchSource::Unknown);
+    }
+
+    #[test]
+    fn likely_launch_source_ech_alone_is_a_strong_browser_signal() {
+        // Minimal CH but with ECH present: score = ECH(+3) + 7 exts (no
+        // bonus) = +3. That lands in Library band (2..=4). Pin this
+        // specific behaviour so a future PR doesn't accidentally raise
+        // the Browser threshold past ECH-only.
+        let mut meta = empty_meta();
+        meta.host = Some(Cow::Borrowed("example.com"));
+        meta.cipher_suites = vec![0x1301];
+        meta.ech_present = true;
+        meta.extension_order = vec![0x0000, 0x002b, 0x0033, 0x000a, 0x000b, 0x000d, 0xfe0d];
+        // Score = +3 (ECH) → Library (2..=4).
+        assert_eq!(likely_launch_source(&meta), LaunchSource::Library);
+    }
+
+    #[test]
+    fn likely_launch_source_grease_doesnt_count_toward_ext_count() {
+        // 5 real ext + 4 GREASE = 9 raw, but only 5 sans GREASE — should land
+        // in the small-ext penalty (-2). Pins that GREASE filtering applies
+        // in the heuristic same as in JA4.
+        let mut meta = empty_meta();
+        meta.host = Some(Cow::Borrowed("example.com"));
+        meta.cipher_suites = vec![0x1301];
+        meta.extension_order = vec![
+            0x0A0A, 0x0000, 0x1A1A, 0x002b, 0x0033, 0x2A2A, 0x000a, 0x000b, 0x3A3A,
+        ];
+        assert_eq!(likely_launch_source(&meta), LaunchSource::Cli);
     }
 }

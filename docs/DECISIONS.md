@@ -252,6 +252,31 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **F5 (P3) `likely_launch_source` classifier — fallback for C16.** Done. Added `pub enum LaunchSource { Browser, Cli, Library, Unknown }` and `pub fn likely_launch_source(meta) -> LaunchSource` to `fingerprint.rs`.
+
+  **Critical scope note (pinned in module docs):** the TLS handshake is made by the *browser process* regardless of which app launched it — Chrome opened by clicking a link in Outlook produces the same TLS fingerprint as Chrome opened from the dock. So we **cannot** distinguish browser-launched-by-email from browser-launched-by-user from the TLS fingerprint. F5 is a *partial* replacement for the broken PPID approach: it narrows the search space ("was it a browser at all?") without solving the launching-app question. The full "this came from email" answer still needs the WebExtension (per DECISIONS.C13) or a process-tree timing heuristic.
+
+  **Decision flow:**
+  1. Compute JA4 once; if `KNOWN_JA4_FINGERPRINTS` has a hit, return the matching bucket directly.
+  2. Otherwise, score browser-likeness from metadata signals:
+     - ECH present → +3 (strong: Chrome/Firefox 2024+)
+     - PQ hybrid key_share → +3 (strong: Chrome/Firefox 2024+)
+     - `compress_certificate` present → +1
+     - HTTP/3 ALPN → +2; HTTP/2 ALPN → +1
+     - `signature_algorithms` present → +1
+     - ≥ 12 extensions sans GREASE → +1
+     - ≤ 5 extensions sans GREASE → −2
+  3. Thresholds (conservative): `≥ 5` → Browser, `≥ 2` → Library, `≤ −1` → Cli, else Unknown.
+
+  **Key tests pin specific decisions:**
+  - `likely_launch_source_ech_alone_is_a_strong_browser_signal` — ECH alone scores +3 → Library bucket. A future PR that raises the Browser threshold past ECH-only would have to update this test, forcing explicit review.
+  - `likely_launch_source_grease_doesnt_count_toward_ext_count` — GREASE filtering applies in the heuristic same as in JA4. 5 real + 4 GREASE = 5 sans-GREASE → small-ext penalty fires.
+  - `likely_launch_source_falls_back_to_unknown_for_ambiguous_shapes` — pins the Unknown band (score 0 or 1) so the classifier doesn't over-attribute.
+
+  **Why conservative thresholds:** better to return `Unknown` than mis-attribute. The cost of a wrong classification is silent policy drift; the cost of `Unknown` is one more layer of signal needed (which Layer 2 already runs anyway).
+
+  **8 new tests; 218 total** (was 210). Clippy clean both feature sets.
+
 - **F4 (P3) JA3 / JA4 → `KnownClient` mapping.** Done. Added:
   - `pub enum KnownClient { Chrome, Firefox, Safari, Curl, Go, Other }` with `kind()` for stable snake_case telemetry labels (O2 / A2 / A3 convention).
   - `pub fn known_client_from_ja3(ja3_md5) -> Option<KnownClient>` and `pub fn known_client_from_ja4(ja4_raw) -> Option<KnownClient>`.
