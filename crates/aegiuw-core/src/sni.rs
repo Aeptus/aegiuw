@@ -1468,6 +1468,60 @@ pub fn parse_handshake_only(handshake: &[u8]) -> Option<SniOutcome<'_>> {
     parse_handshake_message(handshake)
 }
 
+/// Fast pre-filter: does `bytes` look like the start of a TLS ClientHello
+/// handshake message?
+///
+/// Returns `true` iff:
+/// 1. `bytes` has at least 4 bytes (the handshake header: `u8` type + `u24` length).
+/// 2. The first byte equals [`HANDSHAKE_TYPE_CLIENT_HELLO`] (`0x01`).
+/// 3. The claimed body length (`4 + u24`) does not exceed [`MAX_HANDSHAKE_BYTES`].
+///
+/// Does **not** parse the body. Useful as a cheap pre-check in the QUIC
+/// parser before calling [`parse_handshake_message_full`] /
+/// [`parse_handshake_only`] — discards obviously-not-a-CH inputs in
+/// constant time without paying full-parse cost.
+///
+/// SNI backlog Q3.
+///
+/// # Examples
+///
+/// ```
+/// use aegiuw_core::verify_handshake_type;
+///
+/// // Empty / too-short → false.
+/// assert!(!verify_handshake_type(&[]));
+/// assert!(!verify_handshake_type(&[0x01, 0x00, 0x00]));
+///
+/// // ClientHello with a plausible 0-length body.
+/// assert!(verify_handshake_type(&[0x01, 0x00, 0x00, 0x00]));
+///
+/// // Wrong type (ServerHello) → false.
+/// assert!(!verify_handshake_type(&[0x02, 0x00, 0x00, 0x00]));
+///
+/// // Body length claims > 64 KiB → false.
+/// assert!(!verify_handshake_type(&[0x01, 0xFF, 0xFF, 0xFF]));
+/// ```
+pub fn verify_handshake_type(bytes: &[u8]) -> bool {
+    let Some((first, rest)) = bytes.split_first() else {
+        return false;
+    };
+    if *first != HANDSHAKE_TYPE_CLIENT_HELLO {
+        return false;
+    }
+    let Some(len_bytes) = rest.get(..3) else {
+        return false;
+    };
+    let Ok(arr): Result<[u8; 3], _> = len_bytes.try_into() else {
+        return false;
+    };
+    let [hi, mi, lo] = arr;
+    let body_len = ((hi as usize) << 16) | ((mi as usize) << 8) | (lo as usize);
+    let Some(total) = 4usize.checked_add(body_len) else {
+        return false;
+    };
+    total <= MAX_HANDSHAKE_BYTES
+}
+
 /// Parse a TLS ClientHello (records-level entry) into the full set of
 /// observable fields (SNI backlog A1).
 ///
@@ -4448,6 +4502,98 @@ mod tests {
         // Empty / wrong content type cases.
         for input in [&[][..], &[0x17, 0x03, 0x01, 0x00, 0x01, 0xFF][..]] {
             assert_eq!(parse_record(input), reassemble_handshake(input));
+        }
+    }
+
+    // ── Q3: verify_handshake_type fast pre-filter ────────────────────────────
+
+    #[test]
+    fn q3_verify_handshake_type_accepts_real_clienthello_handshakes() {
+        // A real-shaped CH handshake (no record header) must pass the pre-filter.
+        let handshake = build_handshake_message(&build_sni_extension("example.com"));
+        assert!(verify_handshake_type(&handshake));
+        // The pq-shape handshake (long, ~1400 bytes) also passes.
+        let pq_record = build_pq_chrome_clienthello();
+        let pq_handshake = &pq_record[5..];
+        assert!(verify_handshake_type(pq_handshake));
+    }
+
+    #[test]
+    fn q3_verify_handshake_type_rejects_short_inputs() {
+        // Any input shorter than the 4-byte handshake header → false.
+        assert!(!verify_handshake_type(&[]));
+        assert!(!verify_handshake_type(&[HANDSHAKE_TYPE_CLIENT_HELLO]));
+        assert!(!verify_handshake_type(&[HANDSHAKE_TYPE_CLIENT_HELLO, 0x00]));
+        assert!(!verify_handshake_type(&[
+            HANDSHAKE_TYPE_CLIENT_HELLO,
+            0x00,
+            0x00
+        ]));
+        // 4 bytes with body_len = 0 → accept (degenerate but well-formed shape).
+        assert!(verify_handshake_type(&[
+            HANDSHAKE_TYPE_CLIENT_HELLO,
+            0x00,
+            0x00,
+            0x00
+        ]));
+    }
+
+    #[test]
+    fn q3_verify_handshake_type_rejects_wrong_handshake_types() {
+        // ServerHello, CertificateRequest, anything that isn't 0x01.
+        for wrong in [0x00u8, 0x02, 0x03, 0x04, 0x0b, 0x14, 0xff] {
+            assert!(
+                !verify_handshake_type(&[wrong, 0x00, 0x00, 0x10]),
+                "type {wrong:#04x} should be rejected",
+            );
+        }
+    }
+
+    #[test]
+    fn q3_verify_handshake_type_rejects_oversized_body_length() {
+        // body_len = 0xFFFFFF → total = 0x100_0003 → exceeds MAX_HANDSHAKE_BYTES.
+        assert!(!verify_handshake_type(&[
+            HANDSHAKE_TYPE_CLIENT_HELLO,
+            0xFF,
+            0xFF,
+            0xFF
+        ]));
+        // Exactly at the boundary: total = MAX_HANDSHAKE_BYTES → accept.
+        let max_body = MAX_HANDSHAKE_BYTES - 4;
+        assert!(verify_handshake_type(&[
+            HANDSHAKE_TYPE_CLIENT_HELLO,
+            ((max_body >> 16) & 0xff) as u8,
+            ((max_body >> 8) & 0xff) as u8,
+            (max_body & 0xff) as u8,
+        ]));
+        // 1 byte over → reject.
+        let over = MAX_HANDSHAKE_BYTES - 3;
+        assert!(!verify_handshake_type(&[
+            HANDSHAKE_TYPE_CLIENT_HELLO,
+            ((over >> 16) & 0xff) as u8,
+            ((over >> 8) & 0xff) as u8,
+            (over & 0xff) as u8,
+        ]));
+    }
+
+    #[test]
+    fn q3_verify_handshake_type_no_false_negatives_on_accepted_handshakes() {
+        // Belt-and-suspenders: every handshake-byte input that
+        // parse_handshake_only successfully classifies (i.e., returns Some
+        // — including Some(Malformed)) must also pass verify_handshake_type.
+        // The pre-filter must never reject inputs that the parser would
+        // actually entertain.
+        for (label, bytes) in [
+            (
+                "valid SNI CH",
+                build_handshake_message(&build_sni_extension("example.com")),
+            ),
+            ("valid empty-ext CH", build_handshake_message(&[])),
+        ] {
+            assert!(
+                verify_handshake_type(&bytes),
+                "{label}: pre-filter false-negative",
+            );
         }
     }
 

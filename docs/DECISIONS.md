@@ -252,6 +252,21 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **Q3 (P2) `verify_handshake_type` fast pre-filter.** Done. Added `pub fn verify_handshake_type(bytes: &[u8]) -> bool` that returns `true` iff the input looks like the start of a TLS ClientHello handshake: ≥ 4 bytes, first byte is `0x01` (ClientHello), claimed body length `4 + u24` ≤ `MAX_HANDSHAKE_BYTES` (64 KiB).
+
+  **Does NOT parse the body.** Useful as a constant-time pre-check in the QUIC parser before calling `parse_handshake_message_full` / `parse_handshake_only` — discards obviously-not-a-CH inputs without paying full-parse cost.
+
+  **No-false-negatives contract** pinned by `q3_verify_handshake_type_no_false_negatives_on_accepted_handshakes`: every handshake-byte input the parser would entertain must pass the pre-filter. This is the critical safety property — a pre-filter that drops a valid CH would make the QUIC parser silently lose SNI extraction. The reverse direction (false positives — inputs that pass the pre-filter but fail full parse) is acceptable and expected: that's the *cost* of being fast.
+
+  **Boundary cases pinned:**
+  - Empty / 1-3 byte inputs → false (no room for handshake header).
+  - 4 bytes with `body_len = 0` → true (degenerate but well-formed shape — a CH whose body is empty).
+  - Wrong handshake types (0x00, 0x02 = ServerHello, 0x0b = Certificate, …) → false.
+  - `body_len = 0xFFFFFF` → false (oversized claim).
+  - `total = MAX_HANDSHAKE_BYTES` exactly → true; `total = MAX + 1` → false.
+
+  288 tests pass (was 282 — added 5 unit + 1 doctest). Clippy clean both feature sets.
+
 - **Q2 (P1) `parse_record` alias + composition equivalence.** Done. Added `pub fn parse_record(records: &[u8]) -> Option<Cow<'_, [u8]>>` as a thin alias for `reassemble_handshake`. Same code path (both call a shared `parse_record_inner`); the name spells out the composition the higher-level entry points are built from:
 
   ```text
