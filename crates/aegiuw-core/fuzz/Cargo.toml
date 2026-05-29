@@ -12,12 +12,22 @@ publish = false
 edition = "2021"
 license = "AGPL-3.0-or-later"
 
+# Stand-alone manifest: declares its own (empty) workspace so commands run
+# from inside this directory don't trip over the parent workspace's exclusion.
+# Required since cargo-fuzz invokes cargo from this directory.
+[workspace]
+
 [package.metadata]
 cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
 aegiuw-core = { path = ".." }
+# S8: differential-fuzz oracle. rustls's Acceptor is the reference TLS
+# implementation we compare against on host extraction. Default features
+# pull in ring/aws-lc-rs which we don't need for parsing — but keeping
+# defaults on is harmless inside this fuzz-only sub-crate.
+rustls = "0.23"
 
 # Each fuzz target is its own `[[bin]]` so libFuzzer can build them
 # independently and the coverage feedback stays focused per entry point.
@@ -39,6 +49,13 @@ bench = false
 [[bin]]
 name = "parse_handshake_message"
 path = "fuzz_targets/parse_handshake_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "differential_rustls"
+path = "fuzz_targets/differential_rustls.rs"
 test = false
 doc = false
 bench = false

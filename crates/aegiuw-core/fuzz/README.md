@@ -30,6 +30,16 @@ needs nightly, and it's `[workspace] exclude`-d from the top-level
 | `extract_sni` | the whole pipeline (record → handshake → SNI) | transitive coverage; matches the public API entry |
 | `reassemble_handshake` | the allocation hot-path | best signal on the `MAX_HANDSHAKE_BYTES` cap |
 | `parse_handshake_message` | the post-reassembly walker | QUIC parser will reuse this entry directly |
+| `differential_rustls` | host extraction vs. rustls's `Acceptor::accept` | finds cases where two independent parsers disagree on the SNI host (SNI backlog S8) |
+
+The differential target tolerates *policy* differences (rustls rejects many
+ClientHellos for non-SNI reasons — cipher list, supported_versions, TLS-1.3
+specifics) and only panics when **both** parsers extract a host string **and
+they disagree** on its value. That's the high-signal class. Run it with:
+
+```bash
+cargo +nightly fuzz run differential_rustls -- -timeout=1 -max_total_time=600
+```
 
 ## Quick run
 

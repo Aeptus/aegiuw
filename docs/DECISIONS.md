@@ -339,6 +339,15 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 - **P2 (P2) `#[inline]` on Cursor methods.** Done. Added `#[inline]` to all eight `Cursor` accessors (`new`, `remaining`, `read_u8`, `read_u16`, `read_u24`, `read_slice`, `read_u8_prefixed`, `read_u16_prefixed`). Each is a single-expression bounds-checked reader; the parse loop calls them tens of times per ClientHello. Letting the compiler inline across the crate boundary removes call overhead and lets adjacent bounds checks fuse. Cheap commit, no functional change, no test churn.
 
+- **S8 (P3) Differential fuzzing vs. rustls.** ~~Deferred~~ **Done.** Reversed the earlier deferral. Added a fourth cargo-fuzz target `differential_rustls` (with `rustls = "0.23"` as a fuzz-only dep) that drives rustls's `server::Acceptor` over the same bytes we feed `aegiuw_core::extract_sni`, then compares the extracted host strings (case-insensitive — RFC 4343). The harness only panics when **both** parsers extract a host *and* the two hosts differ — the high-signal disagreement class. Tolerated discrepancies (no panic):
+  - one side extracts a host, the other rejects the whole CH (policy difference — rustls is stricter on ciphers/versions than our SNI-only parser);
+  - we return `Encrypted` (ECH detected, outer SNI is a decoy per DECISIONS.C14);
+  - either side returns no host.
+
+  The fuzz Cargo.toml gained an `[workspace]` (empty) section so `cargo check`/`cargo +nightly fuzz` invoked from inside the fuzz dir don't trip over the parent workspace's exclusion. All four fuzz targets type-check on stable; the actual fuzz run still needs nightly per S1.
+
+  The earlier deferral worried about false positives from policy mismatches. That worry was right in shape but addressable in implementation: scoping the assert to "both extract a host *and* differ" filters out the policy-noise. Cost was ~30 min of harness code; payoff is a continuous independent oracle for the parser's most security-critical guarantee (extracting the right host name).
+
 - **P1 (P2) `SniOutcome::Cleartext { host: Cow<'a, str> }`.** ~~Deferred~~ **Done.** Reversed the earlier deferral after the user asked to revisit. `SniOutcome` now carries a lifetime parameter; `Cleartext.host: Cow<'a, str>` borrows directly from the input slice on the single-record happy path (zero allocation) and falls back to `Cow::Owned(String)` on the multi-record path (the reassembly buffer is dropped at end of arm so the host must be promoted). `reassemble_handshake` was split into a fast path (`try_reassemble_single_record` returning `&[u8]`) and the existing owned slow path (`reassemble_handshake_owned` returning `Vec<u8>`); the public function now returns `Cow<'_, [u8]>`. `parse_handshake_message` and the internal `ServerNameOutcome` thread the lifetime; `hrr_sni_consistent` compares Cow values directly (PartialEq via Deref). Test fixtures that built `host: String` upgraded to `host: host.into()` (3 sites).
 
   **Measured impact (criterion `--quick`, Apple Silicon, release):**
