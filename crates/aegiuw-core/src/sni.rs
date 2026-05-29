@@ -3742,6 +3742,22 @@ mod tests {
         );
     }
 
+    // ── T8: Zero-length extensions block ─────────────────────────────────────
+
+    #[test]
+    fn t8_zero_length_extensions_block_parses_as_not_found() {
+        // CH with an extensions block present but empty (extensions_len = 0).
+        // Degenerate but valid per RFC 8446 §4.1.2's `Extension extensions<0..2^16-1>`
+        // — the type construction permits zero entries. No SNI present, so the
+        // outcome is NotFound, not Malformed.
+        let bytes = build_client_hello(&[]);
+        assert_eq!(extract_sni(&bytes), SniOutcome::NotFound);
+        let meta = parse_client_hello_full(&bytes).expect("empty-ext CH parses");
+        assert!(meta.host.is_none());
+        assert!(meta.extension_order.is_empty());
+        assert!(meta.alpn_protocols.is_none());
+    }
+
     // ── Trailing-bytes tolerance (C9, RFC 8446 §4) ───────────────────────────
 
     /// Local fixture: build a ClientHello whose handshake body has extra bytes
