@@ -166,9 +166,11 @@ pub const EXT_ALPN: u16 = 0x0010;
 /// Surfaces in [`ClientHelloMetadata::supported_versions`] (SNI backlog A1).
 pub const EXT_SUPPORTED_VERSIONS: u16 = 0x002b;
 
-/// Extension type for `key_share` (RFC 8446 §4.2.8). We only check presence;
-/// the body's group/key bytes aren't required for our routing decisions.
-/// Surfaces in [`ClientHelloMetadata::key_share_present`] (SNI backlog A1).
+/// Extension type for `key_share` (RFC 8446 §4.2.8). We parse the NamedGroup
+/// IDs from the client_shares list (skipping the key_exchange bytes — we
+/// don't need the actual public keys) so Layer 2 can fingerprint
+/// post-quantum hybrid clients. Surfaces in
+/// [`ClientHelloMetadata::key_share_groups`] (SNI backlog A4).
 pub const EXT_KEY_SHARE: u16 = 0x0033;
 
 /// TLS record content type for handshake messages.
@@ -308,10 +310,16 @@ pub struct ClientHelloMetadata<'a> {
     /// was absent (then the legacy `0x0303` in the ClientHello header is the
     /// negotiated version).
     pub supported_versions: Option<Vec<u16>>,
-    /// `true` if a `key_share` extension was present, regardless of its
-    /// contents. Useful to detect "TLS 1.3-style" handshakes even when the
-    /// `supported_versions` extension is absent.
-    pub key_share_present: bool,
+    /// `key_share` extension contents — every advertised NamedGroup ID in
+    /// wire order. `None` if the extension was absent. `Some(empty)` if the
+    /// client sent an empty `client_shares` list (RFC 8446 §4.2.8 permits
+    /// this to deliberately force a HelloRetryRequest).
+    ///
+    /// Layer 2 can detect post-quantum hybrid clients (X25519MLKEM768,
+    /// SecP256r1MLKEM768, …) via [`ClientHelloMetadata::has_post_quantum_key_share`]
+    /// or pattern-match on classified values via
+    /// [`ClientHelloMetadata::key_share_groups_classified`]. SNI backlog A4.
+    pub key_share_groups: Option<Vec<u16>>,
 }
 
 /// Classified ALPN protocol identifier (SNI backlog A2).
@@ -475,6 +483,47 @@ impl ClientHelloMetadata<'_> {
                 .unwrap_or(TlsVersion::Tls12),
         }
     }
+
+    /// Classify every advertised key_share NamedGroup in wire order.
+    /// Returns `None` if the extension was absent; `Some(empty)` if the
+    /// client sent an empty `client_shares` list (a deliberate HRR-forcing
+    /// signal under RFC 8446 §4.2.8).
+    ///
+    /// SNI backlog A4.
+    pub fn key_share_groups_classified(&self) -> Option<Vec<KeyShareGroup>> {
+        self.key_share_groups.as_ref().map(|groups| {
+            groups
+                .iter()
+                .map(|&g| KeyShareGroup::from_wire(g))
+                .collect()
+        })
+    }
+
+    /// `true` if the client offered the given NamedGroup in its `key_share`.
+    /// Returns `false` when the extension was absent.
+    ///
+    /// SNI backlog A4.
+    pub fn offers_key_share_group(&self, group: KeyShareGroup) -> bool {
+        match &self.key_share_groups {
+            None => false,
+            Some(groups) => groups.iter().any(|&g| KeyShareGroup::from_wire(g) == group),
+        }
+    }
+
+    /// `true` if the client advertised any post-quantum hybrid key_share
+    /// group — RFC 9627's X25519MLKEM768 / SecP256r1MLKEM768 (the
+    /// standardised post-NIST-ML-KEM hybrids) or the older
+    /// X25519Kyber768Draft00 codepoint still in some 2024-era clients.
+    ///
+    /// A high-signal fingerprint for "modern, PQ-aware browser / library."
+    /// SNI backlog A4.
+    pub fn has_post_quantum_key_share(&self) -> bool {
+        self.key_share_groups.as_ref().is_some_and(|groups| {
+            groups
+                .iter()
+                .any(|&g| KeyShareGroup::from_wire(g).is_post_quantum())
+        })
+    }
 }
 
 /// Classified TLS protocol version (SNI backlog A3).
@@ -547,6 +596,89 @@ impl TlsVersion {
             Self::Tls13 => "tls_1_3",
             Self::Other => "other",
         }
+    }
+}
+
+/// Classified TLS NamedGroup for the `key_share` extension (SNI backlog A4).
+///
+/// Wire-level NamedGroup IDs from RFC 8446 §4.2.7 + the IANA TLS Supported
+/// Groups registry. Coverage is intentionally narrow — the two modern
+/// classical groups every browser uses, the two RFC 9627 post-quantum
+/// hybrids (Layer 2's fingerprinting headline), and the legacy
+/// pre-standardisation Kyber hybrid still in some 2024-era clients.
+/// Everything else collapses to [`KeyShareGroup::Other`]; callers who need
+/// to fingerprint at a finer grain can read the raw `u16` values via
+/// [`ClientHelloMetadata::key_share_groups`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyShareGroup {
+    /// Anything not in the named set — GREASE codepoints, secp384r1,
+    /// ffdhe2048, exotic NIST groups, etc. The raw `u16` is still
+    /// available via [`ClientHelloMetadata::key_share_groups`].
+    Other,
+    /// `secp256r1` (NIST P-256) — wire value `0x0017`. RFC 8446 §4.2.7.
+    Secp256r1,
+    /// `x25519` — wire value `0x001d`. RFC 8446 §4.2.7. The dominant
+    /// modern classical group.
+    X25519,
+    /// `X25519MLKEM768` — wire value `0x11ec`. RFC 9627 standardised
+    /// post-quantum hybrid (X25519 + ML-KEM-768 / FIPS 203). Chrome and
+    /// Firefox ship this as their default PQ hybrid.
+    X25519MlKem768,
+    /// `SecP256r1MLKEM768` — wire value `0x1140`. RFC 9627 standardised
+    /// post-quantum hybrid (P-256 + ML-KEM-768). Less common in browsers
+    /// but available in some libraries.
+    SecP256r1MlKem768,
+    /// `X25519Kyber768Draft00` — wire value `0x6399`. Pre-RFC-9627
+    /// draft codepoint used by Chromium between Aug 2023 and the MLKEM
+    /// standardisation. Still seen on some long-running browser channels.
+    X25519Kyber768Draft00,
+}
+
+impl KeyShareGroup {
+    /// Classify a single NamedGroup from its `u16` wire value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aegiuw_core::KeyShareGroup;
+    ///
+    /// assert_eq!(KeyShareGroup::from_wire(0x001d), KeyShareGroup::X25519);
+    /// assert_eq!(KeyShareGroup::from_wire(0x11ec), KeyShareGroup::X25519MlKem768);
+    /// // Unknown / GREASE → Other.
+    /// assert_eq!(KeyShareGroup::from_wire(0x0A0A), KeyShareGroup::Other);
+    /// ```
+    pub fn from_wire(value: u16) -> Self {
+        match value {
+            0x0017 => Self::Secp256r1,
+            0x001d => Self::X25519,
+            0x11ec => Self::X25519MlKem768,
+            0x1140 => Self::SecP256r1MlKem768,
+            0x6399 => Self::X25519Kyber768Draft00,
+            _ => Self::Other,
+        }
+    }
+
+    /// Stable lowercase string for telemetry dimensions, matching the
+    /// O2 / A2 / A3 convention.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Secp256r1 => "secp256r1",
+            Self::X25519 => "x25519",
+            Self::X25519MlKem768 => "x25519_mlkem768",
+            Self::SecP256r1MlKem768 => "secp256r1_mlkem768",
+            Self::X25519Kyber768Draft00 => "x25519_kyber768_draft00",
+            Self::Other => "other",
+        }
+    }
+
+    /// `true` for any post-quantum hybrid variant (standardised or draft).
+    /// The headline fingerprint signal for "modern PQ-aware client."
+    pub fn is_post_quantum(&self) -> bool {
+        matches!(
+            self,
+            Self::X25519MlKem768 | Self::SecP256r1MlKem768 | Self::X25519Kyber768Draft00,
+        )
     }
 }
 
@@ -974,7 +1106,7 @@ pub fn parse_handshake_message_full(handshake: &[u8]) -> Option<ClientHelloMetad
         ech_present: false,
         alpn_protocols: None,
         supported_versions: None,
-        key_share_present: false,
+        key_share_groups: None,
     };
     // P1: host borrows from the input `handshake` slice; no allocation.
     let mut sni_host: Option<&str> = None;
@@ -1039,7 +1171,7 @@ pub fn parse_handshake_message_full(handshake: &[u8]) -> Option<ClientHelloMetad
                 meta.supported_versions = Some(parse_supported_versions_extension(ext_data)?);
             }
             EXT_KEY_SHARE => {
-                meta.key_share_present = true;
+                meta.key_share_groups = Some(parse_key_share_extension(ext_data)?);
             }
             _ => {}
         }
@@ -1133,7 +1265,7 @@ pub fn parse_client_hello_full(bytes: &[u8]) -> Option<ClientHelloMetadata<'_>> 
                     .alpn_protocols
                     .map(|v| v.into_iter().map(|c| Cow::Owned(c.into_owned())).collect()),
                 supported_versions: borrowed.supported_versions,
-                key_share_present: borrowed.key_share_present,
+                key_share_groups: borrowed.key_share_groups,
             })
         }
     }
@@ -1158,6 +1290,29 @@ fn parse_alpn_extension(data: &[u8]) -> Option<Vec<Cow<'_, [u8]>>> {
         out.push(Cow::Borrowed(proto));
     }
     Some(out)
+}
+
+/// Parse the body of a `key_share` extension as it appears in a ClientHello
+/// (RFC 8446 §4.2.8): `u16`-prefixed list of `KeyShareEntry { NamedGroup
+/// group; opaque key_exchange<1..2^16-1>; }`. We collect every advertised
+/// `group` ID and skip the key_exchange bytes — we don't need the actual
+/// public keys for routing decisions. Returns `None` on any structural
+/// overrun. SNI backlog A4.
+fn parse_key_share_extension(data: &[u8]) -> Option<Vec<u16>> {
+    let mut c = Cursor::new(data);
+    let list = c.read_u16_prefixed()?;
+    let mut entries = Cursor::new(list);
+    let mut groups: Vec<u16> = Vec::new();
+    while entries.remaining() > 0 {
+        let group = entries.read_u16()?;
+        // Each KeyShareEntry's key_exchange<1..2^16-1> is u16-prefixed; the
+        // RFC mandates at least 1 byte but we accept zero as a generosity to
+        // empty-client_shares-style HRR-forcing variants (parsers should not
+        // be stricter than the wire forces).
+        let _key_exchange = entries.read_u16_prefixed()?;
+        groups.push(group);
+    }
+    Some(groups)
 }
 
 /// Parse the body of a `supported_versions` extension as it appears in a
@@ -2879,7 +3034,9 @@ mod tests {
             meta.supported_versions.as_deref(),
             Some(&[0x0304, 0x0303][..])
         );
-        assert!(meta.key_share_present);
+        // A4: empty client_shares list is permitted (deliberate HRR-forcing).
+        // The extension is present so key_share_groups is Some(empty_vec).
+        assert_eq!(meta.key_share_groups.as_deref(), Some(&[][..]));
     }
 
     #[test]
@@ -2888,7 +3045,7 @@ mod tests {
         let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
         assert!(meta.alpn_protocols.is_none(), "extension absent -> None");
         assert!(meta.supported_versions.is_none());
-        assert!(!meta.key_share_present);
+        assert!(meta.key_share_groups.is_none());
     }
 
     #[test]
@@ -3195,6 +3352,168 @@ mod tests {
         assert!(meta.offers_tls_version(TlsVersion::Tls12));
         assert!(!meta.offers_tls_version(TlsVersion::Tls13));
         assert!(!meta.offers_tls_version(TlsVersion::Tls11));
+    }
+
+    // ── A4: KeyShareGroup classification + PQ detection ──────────────────────
+
+    /// Build a key_share extension body from a list of (group, key_exchange) tuples.
+    /// Layout (RFC 8446 §4.2.8): `u16` total list length + repeated
+    /// `KeyShareEntry { u16 group; u16-prefixed opaque key_exchange; }`.
+    fn build_key_share_extension(entries: &[(u16, &[u8])]) -> Vec<u8> {
+        let mut list: Vec<u8> = Vec::new();
+        for (group, key_exchange) in entries {
+            list.extend_from_slice(&group.to_be_bytes());
+            list.extend_from_slice(&(key_exchange.len() as u16).to_be_bytes());
+            list.extend_from_slice(key_exchange);
+        }
+        let mut body = Vec::new();
+        body.extend_from_slice(&(list.len() as u16).to_be_bytes());
+        body.extend_from_slice(&list);
+        build_extension(EXT_KEY_SHARE, &body)
+    }
+
+    #[test]
+    fn key_share_group_classifies_the_known_wire_values() {
+        assert_eq!(KeyShareGroup::from_wire(0x0017), KeyShareGroup::Secp256r1);
+        assert_eq!(KeyShareGroup::from_wire(0x001d), KeyShareGroup::X25519);
+        assert_eq!(
+            KeyShareGroup::from_wire(0x11ec),
+            KeyShareGroup::X25519MlKem768,
+        );
+        assert_eq!(
+            KeyShareGroup::from_wire(0x1140),
+            KeyShareGroup::SecP256r1MlKem768,
+        );
+        assert_eq!(
+            KeyShareGroup::from_wire(0x6399),
+            KeyShareGroup::X25519Kyber768Draft00,
+        );
+        // GREASE codepoints → Other.
+        assert_eq!(KeyShareGroup::from_wire(0x0A0A), KeyShareGroup::Other);
+        // secp384r1 / secp521r1 / ffdhe2048 — valid but not in the classified
+        // set; we deliberately collapse them to Other.
+        assert_eq!(KeyShareGroup::from_wire(0x0018), KeyShareGroup::Other);
+        assert_eq!(KeyShareGroup::from_wire(0x0100), KeyShareGroup::Other);
+    }
+
+    #[test]
+    fn key_share_group_kind_strings_are_stable_snake_case() {
+        assert_eq!(KeyShareGroup::Secp256r1.kind(), "secp256r1");
+        assert_eq!(KeyShareGroup::X25519.kind(), "x25519");
+        assert_eq!(KeyShareGroup::X25519MlKem768.kind(), "x25519_mlkem768");
+        assert_eq!(
+            KeyShareGroup::SecP256r1MlKem768.kind(),
+            "secp256r1_mlkem768",
+        );
+        assert_eq!(
+            KeyShareGroup::X25519Kyber768Draft00.kind(),
+            "x25519_kyber768_draft00",
+        );
+        assert_eq!(KeyShareGroup::Other.kind(), "other");
+    }
+
+    #[test]
+    fn key_share_group_is_post_quantum_flags_only_pq_variants() {
+        assert!(KeyShareGroup::X25519MlKem768.is_post_quantum());
+        assert!(KeyShareGroup::SecP256r1MlKem768.is_post_quantum());
+        assert!(KeyShareGroup::X25519Kyber768Draft00.is_post_quantum());
+        assert!(!KeyShareGroup::X25519.is_post_quantum());
+        assert!(!KeyShareGroup::Secp256r1.is_post_quantum());
+        assert!(!KeyShareGroup::Other.is_post_quantum());
+    }
+
+    #[test]
+    fn key_share_groups_parsed_in_wire_order() {
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("example.com"));
+        // Client preference: X25519MLKEM768 first, X25519 fallback. Pin order.
+        exts.extend_from_slice(&build_key_share_extension(&[
+            (0x11ec, &[0xAA; 32]), // x25519_mlkem768
+            (0x001d, &[0xBB; 32]), // x25519
+        ]));
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert_eq!(
+            meta.key_share_groups.as_deref(),
+            Some(&[0x11ec, 0x001d][..])
+        );
+        assert_eq!(
+            meta.key_share_groups_classified().as_deref(),
+            Some(&[KeyShareGroup::X25519MlKem768, KeyShareGroup::X25519][..]),
+        );
+    }
+
+    #[test]
+    fn has_post_quantum_key_share_detects_modern_chromium_fingerprint() {
+        // Real-world Chrome 2026 fingerprint: X25519MLKEM768 + X25519.
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("example.com"));
+        exts.extend_from_slice(&build_key_share_extension(&[
+            (0x11ec, &[0xAA; 32]),
+            (0x001d, &[0xBB; 32]),
+        ]));
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(meta.has_post_quantum_key_share());
+        assert!(meta.offers_key_share_group(KeyShareGroup::X25519MlKem768));
+        assert!(meta.offers_key_share_group(KeyShareGroup::X25519));
+        assert!(!meta.offers_key_share_group(KeyShareGroup::Secp256r1));
+    }
+
+    #[test]
+    fn has_post_quantum_key_share_false_for_classical_only() {
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("example.com"));
+        exts.extend_from_slice(&build_key_share_extension(&[(0x001d, &[0xAA; 32])])); // x25519 only
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(!meta.has_post_quantum_key_share());
+    }
+
+    #[test]
+    fn has_post_quantum_key_share_false_when_extension_absent() {
+        let bytes = build_client_hello(&build_sni_extension("example.com"));
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(!meta.has_post_quantum_key_share());
+        assert!(!meta.offers_key_share_group(KeyShareGroup::X25519));
+    }
+
+    #[test]
+    fn key_share_recognises_legacy_kyber_draft_as_post_quantum() {
+        // Pre-RFC9627 Chromium codepoint — still seen on long-running channels.
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("example.com"));
+        exts.extend_from_slice(&build_key_share_extension(&[(0x6399, &[0xAA; 32])]));
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(meta.has_post_quantum_key_share());
+        assert!(meta.offers_key_share_group(KeyShareGroup::X25519Kyber768Draft00));
+    }
+
+    #[test]
+    fn key_share_empty_client_shares_returns_some_empty_vec() {
+        // RFC 8446 §4.2.8 permits empty client_shares to deliberately force
+        // HelloRetryRequest. The extension is present (key_share_groups is
+        // Some) but the list is empty.
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("example.com"));
+        exts.extend_from_slice(&build_key_share_extension(&[]));
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert_eq!(meta.key_share_groups.as_deref(), Some(&[][..]));
+        assert!(!meta.has_post_quantum_key_share());
+    }
+
+    #[test]
+    fn key_share_rejects_truncated_key_exchange_prefix() {
+        // KeyShareEntry overrun: group byte + 1-byte stub where a u16 prefix is required.
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&build_sni_extension("example.com"));
+        // body: u16 list_len + group(2) + stray(1)  — total list claims 3 bytes
+        let body: Vec<u8> = vec![0x00, 0x03, 0x00, 0x1d, 0x00];
+        exts.extend_from_slice(&build_extension(EXT_KEY_SHARE, &body));
+        let bytes = build_client_hello(&exts);
+        assert_eq!(parse_client_hello_full(&bytes), None);
     }
 
     #[test]

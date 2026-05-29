@@ -32,5 +32,5 @@ pub use risk::{RiskLevel, RiskSignal, Verdict};
 pub use sni::{
     extract_sni, hrr_sni_consistent, is_cloudflare_ech_outer, is_idn_host, parse_client_hello_full,
     parse_handshake_message, parse_handshake_message_full, reassemble_handshake, AlpnProtocol,
-    ClientHelloMetadata, SniOutcome, TlsVersion, CLOUDFLARE_ECH_OUTER_SNI,
+    ClientHelloMetadata, KeyShareGroup, SniOutcome, TlsVersion, CLOUDFLARE_ECH_OUTER_SNI,
 };

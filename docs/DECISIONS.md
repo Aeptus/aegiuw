@@ -252,6 +252,25 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **A4 (P2) Expose key_share group IDs + `KeyShareGroup` classification.** Done. Replaces A1's `key_share_present: bool` field with `key_share_groups: Option<Vec<u16>>` (the actual advertised NamedGroup IDs) and adds a classification enum so Layer 2 can fingerprint post-quantum hybrid clients without juggling wire codepoints. A1 was less than a day old with no external consumers, so the field swap is a safe break.
+
+  **New public surface:**
+  - `pub enum KeyShareGroup { Other, Secp256r1, X25519, X25519MlKem768, SecP256r1MlKem768, X25519Kyber768Draft00 }` — `#[derive(Serialize, Deserialize)]` with `rename_all = "snake_case"`.
+  - `KeyShareGroup::from_wire(u16) -> Self` — maps the five named codepoints, everything else (GREASE, secp384r1, ffdhe groups) → `Other`.
+  - `KeyShareGroup::kind() -> &'static str` — telemetry labels (`secp256r1`, `x25519`, `x25519_mlkem768`, `secp256r1_mlkem768`, `x25519_kyber768_draft00`, `other`).
+  - `KeyShareGroup::is_post_quantum() -> bool` — `true` for the three PQ hybrid variants (standardised RFC 9627 pair + the pre-9627 Kyber draft codepoint still found on some long-running browser channels).
+  - `ClientHelloMetadata::key_share_groups_classified() -> Option<Vec<KeyShareGroup>>`.
+  - `ClientHelloMetadata::offers_key_share_group(KeyShareGroup) -> bool`.
+  - `ClientHelloMetadata::has_post_quantum_key_share() -> bool` — the headline fingerprint signal for "modern PQ-aware client" (Chrome ≥ 2024, Firefox ≥ 2024).
+
+  **Coverage of the registry:** the enum is *intentionally narrow* — five named groups (two modern classical + three PQ hybrids). Other groups in the IANA TLS Supported Groups registry (secp384r1, secp521r1, x448, ffdhe2048..8192) collapse to `Other`. Callers who need finer granularity can read the raw `Vec<u16>` from `key_share_groups` and compare against constants. The trade-off is bounded API surface — extending the enum is a breaking change to downstream telemetry dimensions.
+
+  **Parser:** added `parse_key_share_extension` that walks the `u16`-prefixed list of `KeyShareEntry { group; key_exchange }` and collects each `group` while skipping the key_exchange bytes (we don't need the public keys for routing). Empty `client_shares` returns `Some(empty)` because RFC 8446 §4.2.8 permits empty lists to deliberately force HelloRetryRequest. Truncated `key_exchange` prefix returns `None` (Malformed) — pinned by `key_share_rejects_truncated_key_exchange_prefix`.
+
+  **PQ hybrid fingerprint pinned by `has_post_quantum_key_share_detects_modern_chromium_fingerprint`:** the real-world Chrome 2026 client offers `[X25519MLKEM768, X25519]` (PQ-preferred + classical fallback). Detection must fire on the PQ variant in *any* position of the wire list.
+
+  **Stats:** 150 tests pass (was 139 — added 10 unit tests + 1 doctest on `KeyShareGroup::from_wire`). Clippy clean both feature sets. No allocation regressions: the key_share parser allocates one small `Vec<u16>` per CH that has the extension (typically 1–3 entries).
+
 - **A3 (P1) `supported_versions` classification — `TlsVersion` enum + helpers.** Done. Same shape as A2 (`AlpnProtocol`) but for TLS protocol versions. Layer 2 can now ask "is this a modern client?" or "is this dangerously old?" without juggling wire `u16` codepoints.
 
   **New public surface:**
