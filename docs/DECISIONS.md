@@ -252,6 +252,20 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **V2 (P3) IETF TLS WG watchlist — extensions worth observing as they land.** Done (doc-only, living list). The parser already *tolerates* any unknown extension (records it in `extension_order` for fingerprinting; the `_ => {}` arm per D6), so nothing here is urgent — but several in-flight drafts will add extension types that become useful Layer-2 signals once IANA-assigned. This is the list to revisit when refreshing the parser's named-extension set (A-cluster) or experimenting via the `unstable_extensions` feature (V3).
+
+  **Last reviewed: 2026-05-30. Source of truth: the [IANA TLS ExtensionType Values registry](https://www.iana.org/assignments/tls-extensiontype-values/) + the datatracker — codepoints below marked TBD are *not yet assigned* and MUST be verified there before use.**
+
+  | Draft / RFC | Status (2026-05) | Codepoint | Why we'd observe it |
+  |---|---|---|---|
+  | `draft-ietf-tls-tlsflags` (-14) | WG draft, codepoint **TBD** | TBD (defines a "TLS Flags" sub-registry, values 0–2039) | Compact boolean capability flags in a single extension; a new fingerprint dimension and a cheap "what optional features does this client want" signal once assigned. |
+  | `draft-ietf-tls-trust-anchor-ids` (-03, ~Mar 2026) | WG draft, codepoint **TBD** | TBD | Lets a client signal which trust anchors / CAs it accepts. Relevant to cert-negotiation behaviour and could distinguish managed-device fleets (custom roots) from consumer browsers. Depends on the tls-flags extension above. |
+  | `compress_certificate` (RFC 8879) | published; **observed** via A7 (presence only) | `0x001b` (stable) | A7 flags presence but not the *algorithm list*. If a specific compression algorithm (zstd-with-dictionary, etc.) becomes a useful client fingerprint, extend A7 to expose the algorithm IDs. Watch the cert-compression-algorithm registry for new entries. |
+  | `post_handshake_auth` (RFC 8446 §4.2.6) | published; IANA-stable | `0x0031` (stable) | Already assignable. We don't surface it yet (rare in browser traffic). Watch the WG for exported-authenticator / further PHA mechanisms that add *new* extension types. |
+  | Encrypted Client Hello | draft consolidated 2025, RFC-track | `0xfe0d` (stable, in our set) | Already handled (D2/D4/O5). Watch for the final published RFC number to update the `EXT_ENCRYPTED_CLIENT_HELLO` doc reference from "draft-ietf-tls-esni" to the RFC. |
+
+  **Maintenance contract:** this table goes stale — when an item's codepoint moves from TBD to assigned, either (a) add it to the stable A-cluster named set with an RFC reference, or (b) if still pre-IANA but worth experimenting with, add it to the `unstable_extensions` registry (V3). Update the "Last reviewed" stamp on each pass.
+
 - **V1 (P2) QUIC v2 (RFC 9369) Initial-salt change — documented for the future QUIC SNI parser.** Done (doc-only). When the QUIC SNI parser lands in `aegiuw-daemon` (per C15: intercept UDP 443, parse the QUIC Initial for SNI), it must decrypt the Initial packet before it can hand the inner CRYPTO-frame bytes to `aegiuw_core::parse_handshake_only` (Q1). Initial-packet keys derive from a **version-specific salt** + the client's Destination Connection ID via HKDF-Extract, so the salt must be selected by the long-header version field.
 
   **Exact constants (verified against RFC 9001 / RFC 9369):**
