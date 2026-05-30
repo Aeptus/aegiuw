@@ -252,6 +252,22 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **U2 (P2) Wireshark Lua post-dissector.** Done. New `scripts/wireshark/aegiuw-sni-dissector.lua` (~190 lines) + README. From-scratch reimplementation of `aegiuw-core`'s parser logic in Lua, runs as a Wireshark post-dissector, surfaces:
+  - `aegiuw_sni.outcome` — `cleartext` / `encrypted` / `not_found` / `malformed`.
+  - `aegiuw_sni.host` — extracted SNI host string.
+  - `aegiuw_sni.ech` — ECH-extension-present bool.
+  - `aegiuw_sni.ext_count` — extensions walked.
+  - `aegiuw_sni.note` — diagnostic when parsing failed.
+  - Appends `[aegiuw: cleartext example.com]` to the packet-list Info column so disagreements with Wireshark's TLS dissection are visible at a glance.
+
+  **Why from-scratch reimplementation** (rationale in README): wrapping Wireshark's `tls.handshake.extensions_server_name` field would lose the spot-check value. The point of U2 is "two parsers, same input, do they agree?" — that only catches regressions if both walk the bytes independently.
+
+  **Install path documented** for macOS / Linux / Windows. Mirrors aegiuw-core behaviour as of mid-2026 (C1 + H1–H6 + A1–A12 + D1–D6 contracts). The README explicitly flags this file is **not auto-generated** and can drift — a future divergence in either side must be reflected here manually.
+
+  **Testing approach:** Lua post-dissectors can't be unit-tested cleanly without bundling Wireshark in CI. Right validation is interactive — open a pcap, compare the "aegiuw-core SNI parser view" subtree to Wireshark's TLS dissection.
+
+  No Rust changes. No tests added (intentionally — the spot-check is a manual workflow, not a CI gate).
+
 - **U1 (P2) `aegiuw-sni-inspect` debug CLI.** Done. New workspace member `crates/aegiuw-sni-inspect` with a single binary. Accepts hex on the command line, from a file (`--file`), or from stdin (`--stdin`); decodes (whitespace, `0x` prefixes, mixed case tolerated); runs `extract_sni`, `parse_client_hello_full`, `ja3`, `ja4`, `known_client_from_ja4`, `likely_launch_source` against the bytes; prints a column-aligned report.
 
   **Sample output** for the 72-byte D5 worked-example CH:
