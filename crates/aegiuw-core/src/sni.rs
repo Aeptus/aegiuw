@@ -1644,6 +1644,15 @@ pub fn parse_handshake_message(handshake: &[u8]) -> Option<SniOutcome<'_>> {
 /// handshake message, then passes those bytes directly to this function —
 /// no need to re-wrap in a fake TLS record header.
 ///
+/// **Salt selection (DECISIONS.V1):** reaching those CRYPTO bytes requires
+/// the QUIC layer to first *decrypt* the Initial packet, whose keys derive
+/// from a **version-specific** Initial salt + the client's Destination
+/// Connection ID. QUIC v1 (RFC 9001) and v2 (RFC 9369) use different salts
+/// *and* different HKDF labels — the daemon's QUIC layer must select by the
+/// long-header version field or v2 Initials silently fail to decrypt and the
+/// SNI vanishes. `aegiuw-core` never decrypts; it only sees the
+/// already-decrypted handshake bytes. See `DECISIONS.V1` for the exact salts.
+///
 /// # Examples
 ///
 /// ```

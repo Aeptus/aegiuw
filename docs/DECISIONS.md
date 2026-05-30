@@ -252,6 +252,22 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **V1 (P2) QUIC v2 (RFC 9369) Initial-salt change — documented for the future QUIC SNI parser.** Done (doc-only). When the QUIC SNI parser lands in `aegiuw-daemon` (per C15: intercept UDP 443, parse the QUIC Initial for SNI), it must decrypt the Initial packet before it can hand the inner CRYPTO-frame bytes to `aegiuw_core::parse_handshake_only` (Q1). Initial-packet keys derive from a **version-specific salt** + the client's Destination Connection ID via HKDF-Extract, so the salt must be selected by the long-header version field.
+
+  **Exact constants (verified against RFC 9001 / RFC 9369):**
+
+  | Version | RFC | `initial_salt` (20 bytes, hex) |
+  |---|---|---|
+  | QUIC v1 | RFC 9001 §5.2 | `0x38762cf7f55934b34d179ae6a4c80cadccbb7f0a` |
+  | QUIC v2 | RFC 9369 | `0x0dede3def700a6db819381be6e269dcbf9bd2ed9` |
+  | ⚠️ obsolete v2 *draft* | draft-ietf-quic-v2-00 | `0xa707c203a59b47184a1d62ca570406ea7ae3e5d3` — **do NOT use** |
+
+  **v2 also changes the HKDF labels**, not just the salt: `quic key` → `quicv2 key`, `quic iv` → `quicv2 iv`, `quic hp` → `quicv2 hp`, `quic ku` → `quicv2 ku`. A QUIC parser that swaps only the salt but keeps the v1 labels will still fail.
+
+  **Why this matters / the silent-failure trap:** a wrong salt or label doesn't error — HKDF happily produces *some* key, AES-GCM decryption yields garbage, and the SNI silently vanishes (we'd see no ClientHello where there was one). The obsolete draft salt is a real footgun here because it looks plausible. The future QUIC parser must have a test vector per version (RFC 9001 §A and RFC 9369 §A ship sample packets; both use DCID `0x8394c8f03e515708`).
+
+  **Scope:** `aegiuw-core` never decrypts QUIC — it only ever sees the already-decrypted handshake bytes via `parse_handshake_only` / `parse_handshake_message_full`. This entry is a note for the daemon's QUIC layer; cross-referenced from `parse_handshake_only`'s docstring.
+
 - **U3 (P3) `aegiuw-sni-replay` batch replay tool.** Done. Added a second binary to the `aegiuw-sni-inspect` crate that reads a corpus of ClientHellos (one hex line each), runs each through `extract_sni`, and reports an outcome histogram. The headline metric a replay over real traffic produces is **ECH adoption %** (encrypted / parsed) — see D2 for why that fraction matters.
 
   **Crate restructure (clean DRY move):** extracted the shared `decode_hex` helper and a new pure `OutcomeHistogram` type into `crates/aegiuw-sni-inspect/src/lib.rs`. The crate now has `[lib]` + two `[[bin]]`s (`aegiuw-sni-inspect` U1, `aegiuw-sni-replay` U3). The histogram lives in the lib so its aggregation math is **unit-tested** (7 new tests) rather than trapped in a `main()`. The buckets key off the stable `SniOutcome::kind()` O2 labels, so the replay tool and any future Prometheus dashboard bucket traffic identically.
