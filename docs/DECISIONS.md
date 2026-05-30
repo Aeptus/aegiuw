@@ -252,6 +252,17 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **I3 (P2) `aegiuw-core` still compiles to `wasm32-unknown-unknown` after `tracing` (O1).** Done. Confirmed — `tracing` (added in O1 with `default-features = false`) does **not** break the WASM build, so the N76 plan (compile `aegiuw-core` to WASM for use inside the Cloudflare Worker, single source of truth, no Rust/TS schema drift) holds.
+
+  **Verified in three configs**, all green:
+  - `--no-default-features` (the Worker config per P6: `core + alloc`, no std) — the one that matters.
+  - default features (`std`).
+  - `--no-default-features --features unstable_extensions` (V3 must also stay WASM-safe).
+
+  Why it works: `tracing` `default-features = false` drops its `std` dependency; `memchr` (P5) and `serde` are both `default-features = false`; the parser is `forbid(unsafe_code)` and uses `core::net::IpAddr` (P6) — nothing reaches for a std-only or host-only API on the no_std path.
+
+  Added `scripts/wasm-check.sh` (installs the target on demand, builds all three configs) so this is reproducible and re-runnable before any Worker-integration work. Not wired as a default quality gate — it needs the WASM target installed, which contributors shouldn't be forced to add for `quality:staged`; run it manually (pre-release, or when touching deps). No source changes.
+
 - **I1 (P1) Daemon demo wired to `extract_sni` — end-to-end demonstration.** Done. Rewrote `crates/aegiuw-daemon/src/main.rs` so the demo peeks **fixture ClientHello bytes** through `aegiuw_core::extract_sni` and flows the real outcome through the risk pipeline, instead of hardcoding host strings. The host now genuinely comes off the (fixture) wire.
 
   **Pipeline per sample:** `extract_sni(bytes)` → match the outcome: a `Cleartext` host hits the allow-cache (only short-circuit → `Verdict::safe`) or runs the typosquat + launch-context heuristics; `Encrypted`/`NotFound`/`Malformed` fold through the I2 `into_signals` adapter (the SNI-outcome signal stands in for "couldn't score the host") plus host-independent launch context. The allow-cache is now a real host-membership check against a static slice (the live daemon loads the ed25519-signed JSON per D20).
