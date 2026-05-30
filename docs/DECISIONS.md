@@ -252,6 +252,16 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **D4 (P2) "ECH wins over visible SNI" decision documented at module level.** Done. Added a dedicated `# ECH wins over visible SNI (DECISIONS.C14)` section to `sni.rs` module docs. Spells out:
+  - The rule: when both `encrypted_client_hello` (0xfe0d) and `server_name` are present, `SniOutcome::Encrypted` wins and `host` is `None`.
+  - **Why** (security rationale): the visible SNI in an ECH-bearing CH is a decoy chosen by the client; routing on it would defeat the entire point of ECH (an attacker who knows the parser trusts the outer SNI can use it to bypass isolation policy).
+  - **How** (implementation): the parser scans *all* extensions before deciding the outcome — order on the wire is irrelevant; both are observed, then ECH takes precedence.
+  - **Where pinned** (test cross-refs): `t3_chrome_shape_has_pq_ech_h2_alpn`, `t4_cloudflare_ech_metadata_masks_host_to_none`, `parse_client_hello_full_masks_host_when_ech_present`.
+
+  The decision was already documented in code comments at the enforcement site (line 1440) and on `ClientHelloMetadata.host`'s field doc, plus in DECISIONS.md C14. D4 hoists it to module-level so a reader of `sni.rs` sees it without having to grep for `DECISIONS.C14`.
+
+  Docs-only. 288 tests still pass; clippy clean.
+
 - **D3 (P2) Inline RFC references on every constant.** Done. Audited all 19 constants in `sni.rs`. 13 already carried RFC refs; 3 had stale or missing refs and got upgrades:
 
   - `EXT_ENCRYPTED_CLIENT_HELLO` — tightened from "draft-ietf-tls-esni, IANA" to explicit IANA-codepoint + 2025-consolidation cross-ref to the new D2 module-doc section.

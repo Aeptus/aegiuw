@@ -43,6 +43,26 @@
 //! and is forbidden by RFC 6176; we keep no special variant for it. Vintage
 //! probing tools still send this shape — the test suite pins the rejection.
 //!
+//! # ECH wins over visible SNI (DECISIONS.C14)
+//!
+//! When both an `encrypted_client_hello` (extension `0xfe0d`) and a
+//! `server_name` extension appear in the same ClientHello, **ECH wins**:
+//! the parser surfaces [`SniOutcome::Encrypted`] and the
+//! [`ClientHelloMetadata::host`] field is `None`, *not* the visible host
+//! string from the wire. The visible SNI in an ECH-bearing CH is a
+//! cover-traffic decoy chosen by the client — routing on it would defeat
+//! the entire point of ECH (an attacker who knows the parser will trust
+//! the outer SNI can use it to bypass policy that should have isolated
+//! the connection).
+//!
+//! See `DECISIONS.C14` for the full decision record. The parser
+//! enforces this by scanning *all* extensions before deciding the
+//! outcome — the order of `server_name` and `encrypted_client_hello` on
+//! the wire is irrelevant; both are observed, then ECH takes precedence.
+//! Pinned by `t3_chrome_shape_has_pq_ech_h2_alpn`,
+//! `t4_cloudflare_ech_metadata_masks_host_to_none`, and
+//! `parse_client_hello_full_masks_host_when_ech_present`.
+//!
 //! # Multi-record reassembly
 //!
 //! A single ClientHello *handshake message* is allowed to span multiple TLS
