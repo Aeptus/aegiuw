@@ -59,6 +59,32 @@
 //! [`parse_handshake_message`]. Non-handshake records, truncation, or wildly
 //! over-claimed lengths all yield [`SniOutcome::Malformed`].
 //!
+//! ## The multi-record contract (SNI backlog D1)
+//!
+//! **Naming so callers can grep for it:** "the multi-record contract" is the
+//! set of guarantees [`reassemble_handshake`] (alias: [`parse_record`])
+//! provides to its consumer. Specifically:
+//!
+//! 1. **Accepts 1 or N records** carrying one handshake message. The N=1
+//!    happy path is zero-allocation (returns `Cow::Borrowed`); N>1 promotes
+//!    to `Cow::Owned`.
+//! 2. **Refuses mixed content-type streams.** A non-handshake record
+//!    interleaved before the handshake completes returns `None`. This is
+//!    the Traefik-CVE-class defense — an attacker who can sneak an
+//!    `application_data` record into the stream cannot hide the SNI.
+//! 3. **Caps allocation** at [`MAX_HANDSHAKE_BYTES`] (`64 KiB`) regardless
+//!    of attacker-controlled `u24` length claims.
+//! 4. **First complete handshake wins.** Bytes past the end of the first
+//!    complete handshake are ignored — extra records that happen to be
+//!    coalesced in the input slice don't disturb the parse.
+//! 5. **No streaming.** The function takes a fully-buffered slice; partial
+//!    input returns `None` rather than a "need more bytes" signal.
+//!
+//! The test suite pins each guarantee individually (C1's `1-byte-per-record`
+//! kubernetes-style worst case, the `app-data smuggled mid-handshake`
+//! adversarial case, T1's exhaustive split-position sweep, T7's coalesced
+//! `trailing-record-bytes-ignored` case).
+//!
 //! # Safety discipline
 //!
 //! This function parses adversary-controlled bytes. Every length prefix MUST be

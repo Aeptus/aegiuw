@@ -252,6 +252,12 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **D1 (P1) Module-doc paragraph naming the multi-record contract.** Done. Added a new "The multi-record contract" subsection to `sni.rs`'s module-level docs. Enumerates the 5 guarantees `reassemble_handshake` / `parse_record` provide: (1) accepts 1 or N records (N=1 zero-alloc, N>1 owned); (2) refuses mixed content-type streams (Traefik-CVE-class defense); (3) caps allocation at `MAX_HANDSHAKE_BYTES`; (4) first complete handshake wins (trailing bytes ignored); (5) no streaming — fully-buffered input only.
+
+  Each guarantee cross-references the test that pins it (C1's 1-byte-per-record case, app-data-smuggled-mid-handshake adversarial test, T1's exhaustive split sweep, T7's trailing-bytes-ignored case). The "multi-record contract" name is now greppable so a future developer landing in the parser source has an obvious anchor.
+
+  Docs-only. 288 tests still pass; clippy clean.
+
 - **Q3 (P2) `verify_handshake_type` fast pre-filter.** Done. Added `pub fn verify_handshake_type(bytes: &[u8]) -> bool` that returns `true` iff the input looks like the start of a TLS ClientHello handshake: ≥ 4 bytes, first byte is `0x01` (ClientHello), claimed body length `4 + u24` ≤ `MAX_HANDSHAKE_BYTES` (64 KiB).
 
   **Does NOT parse the body.** Useful as a constant-time pre-check in the QUIC parser before calling `parse_handshake_message_full` / `parse_handshake_only` — discards obviously-not-a-CH inputs without paying full-parse cost.
