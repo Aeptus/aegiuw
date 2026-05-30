@@ -252,6 +252,16 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **D2 (P1) Module-doc paragraph: ECH adoption snapshot.** Done. Added an "ECH adoption (as of 2026)" section to `sni.rs`'s module-level docs. Covers:
+
+  - **Extension type `0xfe0d` is IANA-stable** as of the final ECH draft consolidation in 2025, unchanged through 2026.
+  - **Browser deployment table:** Chrome (m121+) on by default; Firefox (115+) Stable on since 2025; Edge inherits from Chromium; Safari off with no public roadmap mid-2026; curl / wget / minimal CLIs off.
+  - **Why this matters for routing:** ECH adoption is the major shift the parser's `SniOutcome::Encrypted` variant exists for. Cleartext-path dominance shrinks as origin-side deployment ramps; policy that assumes "every connection has an extractable host" silently misses more traffic over time. Layer 2 must continue treating `Encrypted` as a first-class outcome, not an error.
+
+  Cross-references `is_cloudflare_ech_outer` (Cloudflare is the largest deployer — most ECH-bearing CHs we'll see in the wild present `cloudflare-ech.com` as the outer SNI).
+
+  Docs-only. 288 tests still pass; clippy clean.
+
 - **D1 (P1) Module-doc paragraph naming the multi-record contract.** Done. Added a new "The multi-record contract" subsection to `sni.rs`'s module-level docs. Enumerates the 5 guarantees `reassemble_handshake` / `parse_record` provide: (1) accepts 1 or N records (N=1 zero-alloc, N>1 owned); (2) refuses mixed content-type streams (Traefik-CVE-class defense); (3) caps allocation at `MAX_HANDSHAKE_BYTES`; (4) first complete handshake wins (trailing bytes ignored); (5) no streaming — fully-buffered input only.
 
   Each guarantee cross-references the test that pins it (C1's 1-byte-per-record case, app-data-smuggled-mid-handshake adversarial test, T1's exhaustive split sweep, T7's trailing-bytes-ignored case). The "multi-record contract" name is now greppable so a future developer landing in the parser source has an obvious anchor.

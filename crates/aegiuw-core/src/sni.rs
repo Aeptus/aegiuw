@@ -153,11 +153,43 @@
 //!   daemon peeks only at connection start.
 //! - **ECH inner ClientHello**: per `DECISIONS.C14`, ECH presence is
 //!   surfaced as [`SniOutcome::Encrypted`] and routes to Isolate; we
-//!   never attempt to decrypt the inner CH.
+//!   never attempt to decrypt the inner CH. See "ECH adoption" below
+//!   for why this matters in practice.
 //! - **Hostname normalization**: case-folding, punycode decoding, eTLD+1
 //!   extraction, and Unicode confusables handling are the responsibility
 //!   of the Layer 1 "normalize + enrich" step, not this parser. We
 //!   report `Cleartext { host }` verbatim from the wire.
+//!
+//! # ECH adoption (as of 2026, SNI backlog D2)
+//!
+//! Encrypted Client Hello (RFC 9460 / draft-ietf-tls-esni) hides the real
+//! SNI inside an outer handshake encrypted under a server-published public
+//! key. The wire indicator is **extension type `0xfe0d`** — IANA-stable as
+//! of the final draft consolidation in 2025 and unchanged through 2026.
+//!
+//! **Browser deployment snapshot (mid-2026):**
+//!
+//! | Browser | ECH default | Notes |
+//! |---|---|---|
+//! | **Chrome** (m121+) | **on** | Ships ECH for sites with `HTTPS` RR ECH config |
+//! | **Firefox** (115+) | **on** | Default in Nightly since 2024, Stable since 2025 |
+//! | **Edge** | **on** | Inherits from Chromium |
+//! | **Safari** (macOS / iOS) | **off** | No public ECH roadmap as of mid-2026 |
+//! | curl / wget / minimal CLIs | off | No ECH support in default OpenSSL builds |
+//!
+//! **Why this matters for `SniOutcome::Encrypted` routing:** the daemon
+//! sees an `Encrypted` outcome on most Chrome / Firefox / Edge connections
+//! to ECH-enabled origins (Cloudflare is the largest deployer — see
+//! [`is_cloudflare_ech_outer`] / `CLOUDFLARE_ECH_OUTER_SNI`). Per C14 we
+//! treat the visible outer SNI as a decoy and route to Isolate. The
+//! Cleartext path remains dominant for now because (a) Safari users skip
+//! ECH entirely, (b) most non-Cloudflare origins still don't publish
+//! HTTPS-RR ECH configs, and (c) CLI/library traffic never opts in. As
+//! origin-side deployment ramps, the daemon will see the Cleartext fraction
+//! shrink — policy that assumes "every connection has an extractable host"
+//! will silently miss more traffic over time. Layer 2's allow-list logic
+//! must continue to treat `Encrypted` as a first-class outcome, not an
+//! error.
 
 // P6: `core::net::IpAddr` is stable since Rust 1.77; we are on 1.82 so the
 // no_std swap is free. `alloc` brings `String`/`Vec` for the few places we
