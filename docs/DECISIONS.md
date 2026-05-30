@@ -252,6 +252,23 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **I1 (P1) Daemon demo wired to `extract_sni` — end-to-end demonstration.** Done. Rewrote `crates/aegiuw-daemon/src/main.rs` so the demo peeks **fixture ClientHello bytes** through `aegiuw_core::extract_sni` and flows the real outcome through the risk pipeline, instead of hardcoding host strings. The host now genuinely comes off the (fixture) wire.
+
+  **Pipeline per sample:** `extract_sni(bytes)` → match the outcome: a `Cleartext` host hits the allow-cache (only short-circuit → `Verdict::safe`) or runs the typosquat + launch-context heuristics; `Encrypted`/`NotFound`/`Malformed` fold through the I2 `into_signals` adapter (the SNI-outcome signal stands in for "couldn't score the host") plus host-independent launch context. The allow-cache is now a real host-membership check against a static slice (the live daemon loads the ed25519-signed JSON per D20).
+
+  **Demo output covers all five outcome paths:**
+  ```
+  cached host, from browser   host=github.com         → Safe       [NATIVE → NIC]
+  typosquat, from browser     host=micr0soft.com      → Suspicious [ISOLATE → edge]
+  unknown host, from email    host=totally-new-vendor → HighRisk   [ISOLATE → edge]
+  ECH (encrypted SNI)         host=<encrypted>        → Unknown    [ISOLATE → edge]
+  non-TLS / malformed bytes   host=<malformed>        → Unknown    [ISOLATE → edge]
+  ```
+
+  **Fixture builders** (`client_hello`, `sni_extension`, `ech_then_decoy_sni`) live in the daemon because aegiuw-core's own fixtures are `#[cfg(test)]` and not importable — they mirror the wire layout from the sni.rs worked example (D5). The ECH fixture puts a real `0xfe0d` extension *before* a decoy `server_name`, exercising the C14 "ECH wins, decoy masked" path end-to-end (pinned: `outcome == Encrypted`, not the decoy host).
+
+  6 daemon tests (was 3): the original three behaviour pins rebuilt against CH bytes, plus ECH-isolates, malformed-isolates, and a `fixture_client_hello_round_trips_through_extract_sni` guard so the demo builders can't drift into producing bytes the real parser rejects. Daemon builds + tests + clippy green.
+
 - **I2 (P1) `into_signals` adapter — SniOutcome → Layer-2 RiskSignals.** Done. Added `pub fn into_signals(outcome: &SniOutcome<'_>) -> Vec<RiskSignal>` to `risk.rs` (the Layer-1→Layer-2 bridge) plus three new `RiskSignal` variants: `EncryptedClientHello`, `NoServerName`, `MalformedClientHello`.
 
   **Mapping:**
