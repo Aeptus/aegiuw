@@ -252,6 +252,17 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **D5 (P2) Worked example in module docs.** Done. Added a `# Worked example: minimal ClientHello → annotated walk → SniOutcome` section to `sni.rs` module docs.
+
+  Includes:
+  - A 72-byte hex dump of the smallest TLS 1.3 CH with SNI "example.com" (annotated note explains "64-byte" in the backlog wording is approximate — `random[32]` is mandatory per RFC 8446 §4.1.2, so 72 bytes is the floor).
+  - A column-aligned offset/hex/field/cursor-op table tracing every byte through the parser's `Cursor` reads. New readers landing in `sni.rs` for the first time can follow the table top-to-bottom and reproduce the parse manually.
+  - The resulting `SniOutcome` and the full `ClientHelloMetadata` shape for the same input.
+
+  Cross-references T3 corpus for shape-realistic Chrome/Firefox/etc. fixtures so readers know where to find non-minimal examples.
+
+  Docs-only. 288 tests still pass; clippy clean.
+
 - **D4 (P2) "ECH wins over visible SNI" decision documented at module level.** Done. Added a dedicated `# ECH wins over visible SNI (DECISIONS.C14)` section to `sni.rs` module docs. Spells out:
   - The rule: when both `encrypted_client_hello` (0xfe0d) and `server_name` are present, `SniOutcome::Encrypted` wins and `host` is `None`.
   - **Why** (security rationale): the visible SNI in an ECH-bearing CH is a decoy chosen by the client; routing on it would defeat the entire point of ECH (an attacker who knows the parser trusts the outer SNI can use it to bypass isolation policy).

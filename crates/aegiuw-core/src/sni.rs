@@ -43,6 +43,70 @@
 //! and is forbidden by RFC 6176; we keep no special variant for it. Vintage
 //! probing tools still send this shape — the test suite pins the rejection.
 //!
+//! # Worked example: minimal ClientHello → annotated walk → SniOutcome (D5)
+//!
+//! The smallest TLS 1.3 ClientHello with a single SNI extension is 72 bytes
+//! ("64-byte" in the SNI backlog wording is approximate — the `random[32]`
+//! field is mandatory per RFC 8446 §4.1.2, so 72 is the floor for an SNI
+//! of "example.com"). The hex dump below traces every byte through the
+//! parser's [`Cursor`] reads — useful when reading the parser source for
+//! the first time.
+//!
+//! ```text
+//! offset hex                         field                                cursor op
+//! ------ --------------------------- ------------------------------------ -----------------------------
+//!  +0    16                          ContentType = handshake (22 = 0x16)  read_u8  → CONTENT_TYPE_HANDSHAKE
+//!  +1    03 01                       legacy_record_version                read_u16 (ignored)
+//!  +3    00 43                       record fragment_len = 67             read_u16
+//!  +5                                                                     read_slice(67) → handshake bytes
+//!  +5    01                          HandshakeType = client_hello (1)     read_u8  → HANDSHAKE_TYPE_CLIENT_HELLO
+//!  +6    00 00 3f                    handshake body_len = 63              read_u24 (trusted, not re-checked)
+//!  +9    03 03                       legacy_version = 0x0303              read_u16 → enforces TLS_LEGACY_VERSION
+//! +11    aa × 32                     random[32]                           read_slice(32)
+//! +43    00                          legacy_session_id_len = 0            read_u8_prefixed → 0 bytes (≤ 32 ✓)
+//! +44    00 02                       cipher_suites_len = 2                read_u16_prefixed
+//! +46    13 01                       TLS_AES_128_GCM_SHA256 (0x1301)      → 2 bytes (non-empty + even ✓)
+//! +48    01 00                       compression_methods = [null]         read_u8_prefixed → contains(&0) ✓
+//! +50    00 14                       extensions_len = 20                  read_u16_prefixed
+//! +52    00 00                       ext_type = server_name (0x0000)      ext.read_u16 → EXT_SERVER_NAME
+//! +54    00 10                       ext_data_len = 16                    ext.read_u16_prefixed
+//! +56                                                                     parse_server_name_extension(...)
+//! +56    00 0e                       ServerNameList_len = 14              read_u16_prefixed
+//! +58    00                          NameType = host_name (0)             read_u8  → NAME_TYPE_HOST_NAME
+//! +59    00 0b                       host_name_len = 11                   read_u16_prefixed
+//! +61    65 78 61 6d 70 6c 65 2e
+//!        63 6f 6d                    "example.com"                        → host_str, no IDN / IP / etc.
+//! ```
+//!
+//! **Resulting outcome:**
+//!
+//! ```text
+//! extract_sni(bytes) = SniOutcome::Cleartext {
+//!     host: Cow::Borrowed("example.com"),  // P1: borrowed straight from input
+//! }
+//!
+//! parse_client_hello_full(bytes) = Some(ClientHelloMetadata {
+//!     host:                Some(Cow::Borrowed("example.com")),
+//!     ech_present:         false,
+//!     alpn_protocols:      None,
+//!     supported_versions:  None,
+//!     key_share_groups:    None,
+//!     psk_present:         false,
+//!     early_data_present:  false,
+//!     compress_certificate_present: false,
+//!     record_size_limit:   None,
+//!     signature_algorithms: None,
+//!     supported_groups:    None,
+//!     ec_point_formats:    None,
+//!     extension_order:     vec![0x0000],
+//!     cipher_suites:       vec![0x1301],
+//! })
+//! ```
+//!
+//! A realistic Chrome / Firefox ClientHello adds ~15 more extensions and
+//! often a 1.2 KiB X25519MLKEM768 `key_share` blob — see the T3 corpus for
+//! shape-realistic fixtures.
+//!
 //! # ECH wins over visible SNI (DECISIONS.C14)
 //!
 //! When both an `encrypted_client_hello` (extension `0xfe0d`) and a
