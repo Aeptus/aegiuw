@@ -252,6 +252,15 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **I4 (P2) Layer-1+2 Mermaid diagram updated — `extract_sni` marked built.** Done. Updated `docs/diagrams/layer1-2-capture-and-scoring.md`:
+  - `aegiuw-core::sni::extract_sni` flipped from `⚪`/planned to `✅`/built (green).
+  - Added a `risk::into_signals ✅` bridge node (I2) showing the non-Cleartext path: the `SNI` node now forks `Cleartext host → Normalize+enrich` vs `ECH / absent / malformed → into_signals → Vec<RiskSignal>`. Edges use Mermaid's pipe-label form for the `/`-containing labels.
+  - Added the three I2 signals (`EncryptedClientHello` / `NoServerName` / `MalformedClientHello`, all `Unknown`, all ✅) to the signal→severity table, with a note tying them to C14 and the telemetry rationale.
+  - New "Build status" section describing the green end-to-end path (daemon peeks fixture CH → extract_sni → into_signals + heuristics → verdict, `cargo run -p aegiuw-daemon`) and what's still `⚪` (privileged capture, allow-cache loader, RDAP, the actual fork).
+  - Tied the WASM-friendly design note to I3/N76.
+
+  Structure verified balanced (2 subgraphs / 2 ends, the bridge node defined + referenced, fences paired); canonical Mermaid syntax throughout. Doc-only.
+
 - **I3 (P2) `aegiuw-core` still compiles to `wasm32-unknown-unknown` after `tracing` (O1).** Done. Confirmed — `tracing` (added in O1 with `default-features = false`) does **not** break the WASM build, so the N76 plan (compile `aegiuw-core` to WASM for use inside the Cloudflare Worker, single source of truth, no Rust/TS schema drift) holds.
 
   **Verified in three configs**, all green:
