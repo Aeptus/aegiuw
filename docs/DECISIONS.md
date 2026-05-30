@@ -252,6 +252,17 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **D3 (P2) Inline RFC references on every constant.** Done. Audited all 19 constants in `sni.rs`. 13 already carried RFC refs; 3 had stale or missing refs and got upgrades:
+
+  - `EXT_ENCRYPTED_CLIENT_HELLO` — tightened from "draft-ietf-tls-esni, IANA" to explicit IANA-codepoint + 2025-consolidation cross-ref to the new D2 module-doc section.
+  - `CONTENT_TYPE_HANDSHAKE` — added RFC 8446 §B.1 `ContentType::handshake = 22 = 0x16`.
+  - `HANDSHAKE_TYPE_CLIENT_HELLO` — added RFC 8446 §4 `HandshakeType::client_hello = 1`.
+  - `MAX_HANDSHAKE_BYTES` — clarified it's a *parser-internal* limit (not an RFC value), with the RFC 8446 §4 theoretical max (`2^24 - 1` = 16 MiB) cited so the 64 KiB cap rationale is self-contained.
+
+  The remaining 14 constants (every other `EXT_*`, `NAME_TYPE_HOST_NAME`, `TLS_LEGACY_VERSION`, `MAX_RECORD_FRAGMENT`, `CLOUDFLARE_ECH_OUTER_SNI`) already had RFC §-level references in their doc comments — audit logged with no change required.
+
+  Docs-only. 288 tests still pass; clippy clean.
+
 - **D2 (P1) Module-doc paragraph: ECH adoption snapshot.** Done. Added an "ECH adoption (as of 2026)" section to `sni.rs`'s module-level docs. Covers:
 
   - **Extension type `0xfe0d` is IANA-stable** as of the final ECH draft consolidation in 2025, unchanged through 2026.

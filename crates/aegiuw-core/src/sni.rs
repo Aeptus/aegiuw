@@ -207,7 +207,9 @@ use serde::{Deserialize, Serialize};
 /// Extension type for `server_name` (RFC 6066 §3).
 pub const EXT_SERVER_NAME: u16 = 0x0000;
 
-/// Extension type for `encrypted_client_hello` (draft-ietf-tls-esni, IANA).
+/// Extension type for `encrypted_client_hello` (draft-ietf-tls-esni).
+/// IANA-registered codepoint `0xfe0d`, stable since the 2025 draft
+/// consolidation — see the module-level "ECH adoption" section (D2).
 pub const EXT_ENCRYPTED_CLIENT_HELLO: u16 = 0xfe0d;
 
 /// Extension type for `pre_shared_key` (RFC 8446 §4.2.11). The spec requires
@@ -270,10 +272,11 @@ pub const EXT_EC_POINT_FORMATS: u16 = 0x000b;
 /// [`ClientHelloMetadata::key_share_groups`] (SNI backlog A4).
 pub const EXT_KEY_SHARE: u16 = 0x0033;
 
-/// TLS record content type for handshake messages.
+/// TLS record content type for handshake messages (RFC 8446 §B.1,
+/// `ContentType::handshake = 22 = 0x16`).
 pub const CONTENT_TYPE_HANDSHAKE: u8 = 22;
 
-/// Handshake type for ClientHello.
+/// Handshake type for ClientHello (RFC 8446 §4, `HandshakeType::client_hello = 1`).
 pub const HANDSHAKE_TYPE_CLIENT_HELLO: u8 = 1;
 
 /// NameType value for `host_name` inside a ServerName (RFC 6066 §3).
@@ -291,9 +294,15 @@ pub const TLS_LEGACY_VERSION: u16 = 0x0303;
 
 /// Upper bound on the handshake bytes we'll accumulate during reassembly.
 ///
-/// A realistic post-quantum ClientHello sits around 6–8 KB. 64 KB is generous
-/// enough to cover any legitimate handshake while still capping adversarial
-/// "u24 length = 0xFFFFFF" claims at a few extra records worth of allocation.
+/// RFC 8446 §4 defines `Handshake.length` as a `uint24` — so the theoretical
+/// maximum is `2^24 - 1 = 16 MiB`. We cap at `64 KiB` because:
+/// - a realistic post-quantum ClientHello sits around 6–8 KB (X25519MLKEM768
+///   key share alone is ~1.2 KB; see SNI backlog T5);
+/// - 64 KiB is generous enough to cover any legitimate handshake while still
+///   capping adversarial "u24 length = 0xFFFFFF" claims at a few extra
+///   records worth of allocation.
+///
+/// Parser-internal limit, not an RFC value.
 pub const MAX_HANDSHAKE_BYTES: usize = 64 * 1024;
 
 /// Per RFC 8446 §5.1, `TLSPlaintext.length` must not exceed 2¹⁴. We allow a
