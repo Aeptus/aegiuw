@@ -252,6 +252,22 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **I2 (P1) `into_signals` adapter — SniOutcome → Layer-2 RiskSignals.** Done. Added `pub fn into_signals(outcome: &SniOutcome<'_>) -> Vec<RiskSignal>` to `risk.rs` (the Layer-1→Layer-2 bridge) plus three new `RiskSignal` variants: `EncryptedClientHello`, `NoServerName`, `MalformedClientHello`.
+
+  **Mapping:**
+  | Outcome | Signals |
+  |---|---|
+  | `Cleartext` | **none** — the host is the *input* to the typosquat / allow-cache heuristics, not a signal |
+  | `Encrypted` | `[EncryptedClientHello]` |
+  | `NotFound` | `[NoServerName]` |
+  | `Malformed` | `[MalformedClientHello]` |
+
+  **All three new signals assert `Unknown` severity** — they fail-safe to Isolate without crying wolf. They don't change the *fork* decision beyond what an allow-cache miss already implies (only `Safe` takes the Native Path); they exist as **distinct variants for telemetry** (PRD §1.1 wants Malformed distinguished from a missing-SNI case, and ECH distinguished from both). `EncryptedClientHello` at `Unknown` is exactly DECISIONS.C14 ("unreadable SNI → treat as Unknown → isolate"); ECH is normal modern-browser behaviour, not an attack.
+
+  **Why `&SniOutcome` not by-value:** the daemon matches on `Cleartext { host }` to run the host heuristics, then passes the *same* outcome here for the non-Cleartext cases — taking a reference lets both happen. The task named it `into_signals`; the `&` param is a mild naming-convention quibble outweighed by matching the requested API.
+
+  Re-exported from the crate root. 5 new tests (per-variant mapping + a fail-safe-to-Isolate pin across all three). 294 tests pass; clippy clean std + no_std.
+
 - **V3 (P3) `unstable_extensions` Cargo feature — observe pre-IANA draft codepoints without touching the stable parse.** Done. New feature `unstable_extensions` (off by default) gates a `sni::unstable` module + a `ClientHelloMetadata::unstable_extensions()` method.
 
   **Purely additive — the headline guarantee.** With the feature off the module doesn't compile in; with it on, the parser's extension-walk is byte-identical — draft codepoints still land in `extension_order` exactly as the stable parser already records them (A12 / D6's `_ => {}` arm), and the four-variant `SniOutcome` is unchanged. The feature only adds a classification *helper* that reads already-collected data. Pinned by `v3_stable_parse_unaffected_by_unstable_codepoint` (runs with the feature **off** too).

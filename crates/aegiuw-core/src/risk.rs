@@ -4,9 +4,12 @@
 //! that folds a set of signals into one decision.
 
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
+
+use crate::sni::SniOutcome;
 
 /// How dangerous a domain looks, from least to most severe.
 ///
@@ -42,6 +45,21 @@ pub enum RiskSignal {
     RiskyLaunchContext { parent_process: String },
     /// The domain was not found in the signed local allow-cache.
     NotInSafeCache,
+    /// The ClientHello carried an `encrypted_client_hello` extension (ECH) — the
+    /// real SNI is unobservable. Per `DECISIONS.C14` we treat the connection as
+    /// `Unknown` and route to Isolate. **Not** inherently malicious (ECH is normal
+    /// modern-browser behaviour), but the host can't be scored locally. SNI
+    /// backlog I2.
+    EncryptedClientHello,
+    /// The ClientHello parsed but carried no `server_name` extension. No host to
+    /// score; fail-safe to Isolate. Distinguished from [`MalformedClientHello`]
+    /// and from ECH for telemetry. SNI backlog I2.
+    NoServerName,
+    /// The peeked bytes did not parse as a TLS ClientHello — truncated input, a
+    /// non-TLS protocol on `:443`, or hostile probing. No host to score; fail-safe
+    /// to Isolate. Kept distinct for telemetry (PRD §1.1: a malformed CH suggests
+    /// either an attacker or a non-TLS protocol). SNI backlog I2.
+    MalformedClientHello,
 }
 
 impl RiskSignal {
@@ -51,7 +69,42 @@ impl RiskSignal {
             RiskSignal::Typosquat { .. } => RiskLevel::Suspicious,
             RiskSignal::RiskyLaunchContext { .. } => RiskLevel::HighRisk,
             RiskSignal::NotInSafeCache => RiskLevel::Unknown,
+            // The three SNI-outcome signals all fail-safe to Isolate without
+            // crying wolf: unreadable/absent/malformed host → `Unknown`. They
+            // exist as distinct variants for telemetry, not to escalate the
+            // verdict beyond what an allow-cache miss already implies. SNI
+            // backlog I2.
+            RiskSignal::EncryptedClientHello => RiskLevel::Unknown,
+            RiskSignal::NoServerName => RiskLevel::Unknown,
+            RiskSignal::MalformedClientHello => RiskLevel::Unknown,
         }
+    }
+}
+
+/// Adapt a parsed [`SniOutcome`] into the Layer-2 risk signals it implies
+/// (SNI backlog I2).
+///
+/// This is the bridge between Layer 1 (the SNI parser) and Layer 2 (the risk
+/// engine): the daemon peeks the ClientHello, calls
+/// [`extract_sni`](crate::extract_sni), then folds the outcome into the
+/// signal stream alongside its allow-cache / typosquat / context signals.
+///
+/// | Outcome | Signals |
+/// |---|---|
+/// | [`SniOutcome::Cleartext`] | **none** — the host is the *input* to the typosquat / cache heuristics, not a signal itself |
+/// | [`SniOutcome::Encrypted`] | `[EncryptedClientHello]` |
+/// | [`SniOutcome::NotFound`] | `[NoServerName]` |
+/// | [`SniOutcome::Malformed`] | `[MalformedClientHello]` |
+///
+/// Takes `&SniOutcome` (not by value) so a caller that matched on
+/// `Cleartext { host }` to run the host heuristics can still pass the same
+/// outcome here for the non-Cleartext cases.
+pub fn into_signals(outcome: &SniOutcome<'_>) -> Vec<RiskSignal> {
+    match outcome {
+        SniOutcome::Cleartext { .. } => Vec::new(),
+        SniOutcome::Encrypted => vec![RiskSignal::EncryptedClientHello],
+        SniOutcome::NotFound => vec![RiskSignal::NoServerName],
+        SniOutcome::Malformed => vec![RiskSignal::MalformedClientHello],
     }
 }
 
@@ -133,5 +186,61 @@ mod tests {
     #[test]
     fn only_safe_allows_native_path() {
         assert!(Verdict::safe().allows_native_path());
+    }
+
+    // ── I2: into_signals adapter ─────────────────────────────────────────────
+
+    use alloc::borrow::Cow;
+
+    #[test]
+    fn into_signals_cleartext_emits_nothing() {
+        // The host flows into the typosquat / cache heuristics one layer up —
+        // it is not itself a risk signal.
+        let outcome = SniOutcome::Cleartext {
+            host: Cow::Borrowed("example.com"),
+        };
+        assert!(into_signals(&outcome).is_empty());
+    }
+
+    #[test]
+    fn into_signals_encrypted_emits_ech_signal() {
+        assert_eq!(
+            into_signals(&SniOutcome::Encrypted),
+            vec![RiskSignal::EncryptedClientHello],
+        );
+    }
+
+    #[test]
+    fn into_signals_not_found_emits_no_server_name() {
+        assert_eq!(
+            into_signals(&SniOutcome::NotFound),
+            vec![RiskSignal::NoServerName],
+        );
+    }
+
+    #[test]
+    fn into_signals_malformed_emits_malformed_signal() {
+        assert_eq!(
+            into_signals(&SniOutcome::Malformed),
+            vec![RiskSignal::MalformedClientHello],
+        );
+    }
+
+    #[test]
+    fn sni_outcome_signals_all_fail_safe_to_isolate() {
+        // None of the SNI-outcome signals assert `Safe` — every one routes to
+        // Isolate when folded into a verdict (the host couldn't be scored).
+        for outcome in [
+            SniOutcome::Encrypted,
+            SniOutcome::NotFound,
+            SniOutcome::Malformed,
+        ] {
+            let verdict = Verdict::evaluate(into_signals(&outcome));
+            assert!(
+                !verdict.allows_native_path(),
+                "{outcome:?} must not take the Native Path",
+            );
+            assert_eq!(verdict.level, RiskLevel::Unknown);
+        }
     }
 }

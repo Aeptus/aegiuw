@@ -33,7 +33,7 @@ pub use fingerprint::{
     ja3, ja4, ja4_h, known_client_from_ja3, known_client_from_ja4, likely_launch_source, Ja3, Ja4,
     Ja4H, Ja4HInput, KnownClient, LaunchSource, KNOWN_JA3_FINGERPRINTS, KNOWN_JA4_FINGERPRINTS,
 };
-pub use risk::{RiskLevel, RiskSignal, Verdict};
+pub use risk::{into_signals, RiskLevel, RiskSignal, Verdict};
 pub use sni::{
     extract_sni, hrr_sni_consistent, is_cloudflare_ech_outer, is_idn_host, parse_client_hello_full,
     parse_handshake_message, parse_handshake_message_full, parse_handshake_only, parse_record,
