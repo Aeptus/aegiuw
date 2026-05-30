@@ -252,6 +252,16 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **D6 (P3) GREASE pattern documented at module level + on the `_ => {}` arm.** Done.
+
+  Two additions:
+  1. **Module-level "GREASE handling" section** in `sni.rs` docs explaining the RFC 8701 §3 `0x?A?A` pattern (high byte = low byte, low nibble = 0xA → 16 codepoints), the parser contract (silently tolerate unknown types, record in `extension_order` for fingerprinting, never reject on the GREASE pattern), and the separation of concerns between parser (GREASE-agnostic) and fingerprint layer (`is_grease_codepoint` filters before hashing).
+  2. **Inline comment on the extension-walk `_ => {}` default arm** explicitly noting it catches GREASE codepoints alongside any other unrecognised type, cites RFC 8446 §4.2's "MUST send anything not understood as unknown extensions" requirement, and explains why GREASE filtering happens at the fingerprint layer rather than the parser layer (the parser must preserve wire fidelity for callers doing JA3/JA4-style research).
+
+  Cross-references the T2 GREASE-around-server_name tests and the `grease_pattern_matches_rfc_8701_codepoints` fingerprint test.
+
+  Docs-only. 288 tests still pass; clippy clean.
+
 - **D5 (P2) Worked example in module docs.** Done. Added a `# Worked example: minimal ClientHello → annotated walk → SniOutcome` section to `sni.rs` module docs.
 
   Includes:

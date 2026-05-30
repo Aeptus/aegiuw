@@ -43,6 +43,35 @@
 //! and is forbidden by RFC 6176; we keep no special variant for it. Vintage
 //! probing tools still send this shape — the test suite pins the rejection.
 //!
+//! # GREASE handling (RFC 8701, SNI backlog D6)
+//!
+//! Browsers sprinkle reserved "GREASE" codepoints throughout cipher lists,
+//! extension types, and `supported_groups` to stress-test server
+//! implementations into tolerating unknown values. RFC 8701 §3 reserves
+//! the pattern **`0x?A?A`** — high byte equals low byte, low nibble is
+//! `0xA` — giving 16 codepoints: `0x0A0A, 0x1A1A, 0x2A2A, …, 0xFAFA`.
+//!
+//! **Parser contract:** the extension-walk loop's default `_ => {}` arm
+//! catches every unrecognised extension type, including GREASE. The body
+//! is skipped (we still read its `u16`-prefixed length to advance the
+//! cursor), the type code is recorded in
+//! [`ClientHelloMetadata::extension_order`] (so fingerprinters see it),
+//! and parsing continues. The same is true for cipher_suites and
+//! supported_groups — we read the codepoints but never reject on the
+//! GREASE pattern.
+//!
+//! **Filtering at the fingerprint layer**, not the parser layer:
+//! [`crate::fingerprint::is_grease_codepoint`] is the single source of
+//! truth for the `0x?A?A` test. JA3 (F1) and JA4 (F2) strip GREASE before
+//! hashing because a browser that re-randomises its GREASE picks between
+//! releases would otherwise get a fresh fingerprint every patch version.
+//! The parser stays GREASE-agnostic so that callers who need the *raw*
+//! extension order for research / debugging see what was actually on the
+//! wire.
+//!
+//! Pinned by `t2_*` (GREASE-around-server_name) and the
+//! `grease_pattern_matches_rfc_8701_codepoints` fingerprint test.
+//!
 //! # Worked example: minimal ClientHello → annotated walk → SniOutcome (D5)
 //!
 //! The smallest TLS 1.3 ClientHello with a single SNI extension is 72 bytes
@@ -1517,6 +1546,17 @@ pub fn parse_handshake_message_full(handshake: &[u8]) -> Option<ClientHelloMetad
             EXT_EC_POINT_FORMATS => {
                 meta.ec_point_formats = Some(parse_ec_point_formats_extension(ext_data)?);
             }
+            // D6: GREASE codepoints (RFC 8701, pattern 0x?A?A — high byte =
+            // low byte, low nibble = 0xA: 0x0A0A, 0x1A1A, …, 0xFAFA) and
+            // any other unrecognised extension type fall here and are
+            // silently ignored. The wire MUST tolerate unknown extension
+            // types per RFC 8446 §4.2 ("[the client] MUST send anything not
+            // understood as unknown extensions"); browsers rely on
+            // middleboxes / servers ignoring unknown types and use GREASE
+            // to stress-test that property. We follow the same contract:
+            // record the type in `extension_order` (A12) for fingerprinting,
+            // skip the body, continue scanning. GREASE filtering happens at
+            // the fingerprint layer (`is_grease_codepoint`), not here.
             _ => {}
         }
     }
