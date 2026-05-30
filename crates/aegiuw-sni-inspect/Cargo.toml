@@ -1,12 +1,13 @@
-# SNI backlog U1: small debug CLI that reads a hex-encoded ClientHello (or
-# a file containing hex) and prints the parsed structure — extract_sni
-# outcome, full ClientHelloMetadata, JA3, and JA4. Useful when triaging a
-# real capture: pre-extract the TLS bytes with `tshark -T fields -e
-# tls.handshake -x <file>` then feed them here.
+# SNI debug tooling for aegiuw-core:
+#   aegiuw-sni-inspect (U1) — deep dump of a single hex-encoded ClientHello.
+#   aegiuw-sni-replay  (U3) — batch-replay many ClientHellos and report an
+#                             outcome histogram (ECH adoption, top hosts, …).
+# Both consume hex pre-extracted from a real capture with e.g.
+# `tshark -T fields -e tls.handshake -x <pcap>`.
 
 [package]
 name = "aegiuw-sni-inspect"
-description = "Debug CLI: parse a hex-encoded TLS ClientHello and print the aegiuw-core view of it (SniOutcome, ClientHelloMetadata, JA3, JA4)."
+description = "SNI debug tooling for aegiuw-core: inspect a single ClientHello (aegiuw-sni-inspect) or batch-replay many and histogram the outcomes (aegiuw-sni-replay)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,9 +16,17 @@ authors.workspace = true
 rust-version.workspace = true
 publish = false
 
+[lib]
+name = "aegiuw_sni_inspect"
+path = "src/lib.rs"
+
 [[bin]]
 name = "aegiuw-sni-inspect"
 path = "src/main.rs"
+
+[[bin]]
+name = "aegiuw-sni-replay"
+path = "src/bin/replay.rs"
 
 [dependencies]
 aegiuw-core = { path = "../aegiuw-core" }

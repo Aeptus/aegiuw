@@ -252,6 +252,18 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **U3 (P3) `aegiuw-sni-replay` batch replay tool.** Done. Added a second binary to the `aegiuw-sni-inspect` crate that reads a corpus of ClientHellos (one hex line each), runs each through `extract_sni`, and reports an outcome histogram. The headline metric a replay over real traffic produces is **ECH adoption %** (encrypted / parsed) — see D2 for why that fraction matters.
+
+  **Crate restructure (clean DRY move):** extracted the shared `decode_hex` helper and a new pure `OutcomeHistogram` type into `crates/aegiuw-sni-inspect/src/lib.rs`. The crate now has `[lib]` + two `[[bin]]`s (`aegiuw-sni-inspect` U1, `aegiuw-sni-replay` U3). The histogram lives in the lib so its aggregation math is **unit-tested** (7 new tests) rather than trapped in a `main()`. The buckets key off the stable `SniOutcome::kind()` O2 labels, so the replay tool and any future Prometheus dashboard bucket traffic identically.
+
+  **Output:** per-bucket counts + percentages + ASCII bars, a `total parsed` line, ECH-adoption percentage, and the top-10 cleartext hosts (descending count, name-asc tiebreak for determinism). `decode_errors` (lines that weren't valid hex) are counted separately from the four parse outcomes — a decode error means we never got bytes to parse.
+
+  **Input format — newline-delimited hex, not direct pcap (deferred with rationale):** one hex ClientHello per line (record-framed wire bytes), `#` comments and blank lines skipped. Direct libpcap/pcapng parsing was deferred because it would drag a pcap parser **plus a TCP-reassembly stack** into a debug tool — heavy and error-prone for marginal benefit, since anyone with a pcap already has `tshark`. The docs ship the extraction recipe: `tshark -r capture.pcap -Y 'tls.handshake.type == 1' -T fields -e tls.record | tr -d ':' > corpus.hexlines`. This keeps the same zero-heavy-deps posture as U1 (the only dep is `aegiuw-core` via path).
+
+  **Bug caught during U3 (latent in U1):** the shared decoder's docstring claimed "`0x` prefixes tolerated", but the filter-based approach (strip everything not `[0-9A-Fa-f]`) keeps the leading `0` of a `0x` token and drops only the `x` — so `0x16,0x03` decodes to `[0x01, 0x60, 0x03]`, not `[0x16, 0x03]`. The claim shipped untested in U1's docstring one commit earlier. Moving the decoder into a unit-tested lib surfaced it immediately; fixed the claim in both the lib doc and U1's usage text, and pinned the actual (mangling) behaviour with `decode_hex_is_not_0x_prefix_aware` so the sharp edge is documented rather than silently wrong.
+
+  Workspace builds green; clippy clean across the workspace; 7 new lib tests pass; the 288 aegiuw-core tests are unchanged (no core changes).
+
 - **U2 (P2) Wireshark Lua post-dissector.** Done. New `scripts/wireshark/aegiuw-sni-dissector.lua` (~190 lines) + README. From-scratch reimplementation of `aegiuw-core`'s parser logic in Lua, runs as a Wireshark post-dissector, surfaces:
   - `aegiuw_sni.outcome` — `cleartext` / `encrypted` / `not_found` / `malformed`.
   - `aegiuw_sni.host` — extracted SNI host string.

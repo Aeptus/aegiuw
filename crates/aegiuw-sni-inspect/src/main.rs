@@ -39,6 +39,7 @@ use aegiuw_core::{
     fingerprint::{ja3, ja4, known_client_from_ja4, likely_launch_source},
     parse_client_hello_full, AlpnProtocol, KeyShareGroup, SniOutcome, TlsVersion,
 };
+use aegiuw_sni_inspect::decode_hex;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -135,45 +136,12 @@ fn usage() -> String {
     aegiuw-sni-inspect --stdin\n\
     \n\
     HEX is the record-framed wire bytes (same shape the daemon sees), case-\n\
-    insensitive, whitespace and `0x` prefixes tolerated. Empty input is\n\
+    insensitive; whitespace, `,` and `:` separators tolerated. Empty input is\n\
     rejected.\n\
     \n\
     pcap support is out of scope. Use `tshark -T fields -e tls.record -x` to\n\
     pre-extract a ClientHello from a pcap and pipe the hex into this tool.\n"
         .to_string()
-}
-
-/// Decode a string of hex characters into bytes. Tolerates whitespace,
-/// commas, colons, and `0x` prefixes (anything not in `[0-9A-Fa-f]` is
-/// stripped before pairing nibbles). Returns Err on odd nibble count or
-/// invalid character after stripping.
-fn decode_hex(input: &str) -> Result<Vec<u8>, String> {
-    let cleaned: String = input.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-    if cleaned.len() % 2 != 0 {
-        return Err(format!(
-            "odd number of hex digits ({}); pairs required",
-            cleaned.len(),
-        ));
-    }
-    let mut out = Vec::with_capacity(cleaned.len() / 2);
-    let bytes = cleaned.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let hi = hex_nibble(bytes[i])?;
-        let lo = hex_nibble(bytes[i + 1])?;
-        out.push((hi << 4) | lo);
-        i += 2;
-    }
-    Ok(out)
-}
-
-fn hex_nibble(byte: u8) -> Result<u8, String> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        other => Err(format!("invalid hex byte: {other:#04x}")),
-    }
 }
 
 fn format_outcome(outcome: &SniOutcome<'_>) -> String {
