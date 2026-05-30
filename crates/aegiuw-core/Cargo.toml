@@ -26,6 +26,12 @@ std = []
 # attacker-controlled and may contain unwanted strings if logs are later
 # scraped for keywords.
 debug-malformed = []
+# SNI backlog V3: opt-in classification of pre-IANA / TLS-WG-draft extension
+# codepoints (the `unstable` module + `ClientHelloMetadata::unstable_extensions`).
+# Off by default and MUST stay off in release builds — draft codepoints are
+# not permanently assigned and may change/reuse. Additive only: the stable
+# parse is byte-identical with or without this feature.
+unstable_extensions = []
 
 [dependencies]
 # serde with no_std-compatible defaults so the crate compiles under

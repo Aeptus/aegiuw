@@ -252,6 +252,24 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **V3 (P3) `unstable_extensions` Cargo feature — observe pre-IANA draft codepoints without touching the stable parse.** Done. New feature `unstable_extensions` (off by default) gates a `sni::unstable` module + a `ClientHelloMetadata::unstable_extensions()` method.
+
+  **Purely additive — the headline guarantee.** With the feature off the module doesn't compile in; with it on, the parser's extension-walk is byte-identical — draft codepoints still land in `extension_order` exactly as the stable parser already records them (A12 / D6's `_ => {}` arm), and the four-variant `SniOutcome` is unchanged. The feature only adds a classification *helper* that reads already-collected data. Pinned by `v3_stable_parse_unaffected_by_unstable_codepoint` (runs with the feature **off** too).
+
+  **Surface:**
+  - `pub enum UnstableExtension { EchDraft, TlsFlags, TrustAnchorIds }` with a `kind()` telemetry label (O2 convention).
+  - `pub const UNSTABLE_EXTENSION_TABLE: &[(u16, UnstableExtension)]` — the experimental codepoint→class table.
+  - `pub fn classify_unstable(u16) -> Option<UnstableExtension>` — table lookup.
+  - `ClientHelloMetadata::unstable_extensions() -> Vec<(u16, UnstableExtension)>` (feature-gated) — classifies the draft codepoints in `extension_order`, in wire order.
+
+  **Seed = historical ECH draft block `0xfe08..=0xfe0c`.** This is the one defensible, instructive real example: ECH iterated its codepoint through the `0xfe0X` experimental block during drafting before settling on the stable `0xfe0d` (`EXT_ENCRYPTED_CLIENT_HELLO`). `classify_unstable(0xfe0d)` returns `None` — the stable codepoint is *not* unstable (pinned). `TlsFlags` / `TrustAnchorIds` are present as enum variants (documenting the V2 roadmap) but have **no table entry** because their codepoints are still TBD per the V2 watchlist — add an entry when IANA assigns, or when experimenting against a specific draft revision.
+
+  **Contract:** release builds MUST NOT enable this feature — draft codepoints are not permanently assigned and may change or be reused. When a codepoint goes TBD→assigned, promote it to the stable A-cluster named set and remove the unstable entry. Compiles clean under feature on/off × std/no_std; clippy clean across all four.
+
+  **Bonus deflake (surfaced by V3's tests):** the new V3 tests shifted the parallel test schedule and exposed a latent flake in the T16 tracing-capture tests. Root cause: `tracing` caches per-callsite interest *process-globally* — if another test hit `extract_sni`'s `trace!` callsite first under the default no-op dispatcher, interest was cached as `never` and the thread-local capturing subscriber was bypassed. Fixed by switching `capture_events` from `with_default` to `set_default` + `tracing::callsite::rebuild_interest_cache()`, which re-evaluates every callsite against the now-current capturing dispatcher. Stable across 5 consecutive feature-off runs and 3 feature-on runs.
+
+  289 tests pass feature-off, 294 feature-on (6 new V3 tests: ECH-draft block recognition, stable-ECH/unknown exclusion, kind() labels, metadata wire-order classification, empty case, and the feature-off additive-parse pin).
+
 - **V2 (P3) IETF TLS WG watchlist — extensions worth observing as they land.** Done (doc-only, living list). The parser already *tolerates* any unknown extension (records it in `extension_order` for fingerprinting; the `_ => {}` arm per D6), so nothing here is urgent — but several in-flight drafts will add extension types that become useful Layer-2 signals once IANA-assigned. This is the list to revisit when refreshing the parser's named-extension set (A-cluster) or experimenting via the `unstable_extensions` feature (V3).
 
   **Last reviewed: 2026-05-30. Source of truth: the [IANA TLS ExtensionType Values registry](https://www.iana.org/assignments/tls-extensiontype-values/) + the datatracker — codepoints below marked TBD are *not yet assigned* and MUST be verified there before use.**

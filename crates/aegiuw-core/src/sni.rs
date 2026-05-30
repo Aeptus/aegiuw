@@ -832,6 +832,118 @@ impl ClientHelloMetadata<'_> {
                 .any(|&g| KeyShareGroup::from_wire(g).is_post_quantum())
         })
     }
+
+    /// Classify the pre-IANA / draft extension types present in
+    /// [`extension_order`](ClientHelloMetadata::extension_order) against the
+    /// experimental [`unstable::UNSTABLE_EXTENSION_TABLE`]. Returns each
+    /// recognised `(wire_codepoint, class)` pair in wire order.
+    ///
+    /// **Only available with the `unstable_extensions` Cargo feature.** The
+    /// stable parse is byte-identical whether or not the feature is on —
+    /// this method reads data the parser *already* collected (A12) and never
+    /// changes the four-variant [`SniOutcome`] result. See SNI backlog V3 and
+    /// the [`unstable`] module docs for the experimental-codepoint contract.
+    #[cfg(feature = "unstable_extensions")]
+    pub fn unstable_extensions(&self) -> Vec<(u16, unstable::UnstableExtension)> {
+        self.extension_order
+            .iter()
+            .filter_map(|&t| unstable::classify_unstable(t).map(|c| (t, c)))
+            .collect()
+    }
+}
+
+/// Experimental classification of pre-IANA / TLS-WG-draft extension types
+/// (SNI backlog V3).
+///
+/// **Gated behind the `unstable_extensions` Cargo feature, off by default.**
+///
+/// # The contract
+///
+/// Codepoints in [`UNSTABLE_EXTENSION_TABLE`] are **NOT permanently
+/// IANA-assigned**. Drafts move their provisional codepoints between
+/// revisions, and a value can be reused by an unrelated future extension —
+/// that's the entire reason this lives behind a feature flag rather than in
+/// the stable A-cluster named set. Enabling the feature lets you *observe*
+/// these draft codepoints (via
+/// [`ClientHelloMetadata::unstable_extensions`]) while you experiment, with
+/// two guarantees:
+///
+/// 1. **The stable parse is unaffected.** With the feature off the module
+///    doesn't exist; with it on, the parser's extension-walk is unchanged —
+///    draft codepoints still land in `extension_order` exactly as before,
+///    and the four-variant [`SniOutcome`] is identical. This module only
+///    *reads* that already-collected data.
+/// 2. **No stable build ships these codepoints.** The daemon's release
+///    builds must NOT enable `unstable_extensions`; it's for local
+///    experimentation against a specific draft only.
+///
+/// # Adding a draft
+///
+/// When you want to experiment with a WG draft (see the V2 watchlist), add
+/// its provisional codepoint to [`UNSTABLE_EXTENSION_TABLE`] with the
+/// matching [`UnstableExtension`] variant. When IANA permanently assigns the
+/// codepoint, promote it to the stable A-cluster named set instead and
+/// remove the entry here.
+#[cfg(feature = "unstable_extensions")]
+pub mod unstable {
+    use serde::{Deserialize, Serialize};
+
+    /// Class of a recognised pre-IANA / draft extension type (SNI backlog V3).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum UnstableExtension {
+        /// An earlier Encrypted Client Hello *draft* codepoint from the
+        /// `0xfe0X` experimental block. ECH iterated its codepoint through
+        /// that block during drafting before settling on `0xfe0d` (the
+        /// stable [`EXT_ENCRYPTED_CLIENT_HELLO`](super::EXT_ENCRYPTED_CLIENT_HELLO)).
+        /// Old clients / middleboxes may still emit an earlier value;
+        /// recognising it as draft-ECH is the canonical example of why
+        /// unstable codepoints need isolation from the stable set.
+        EchDraft,
+        /// `draft-ietf-tls-tlsflags` — the TLS Flags extension. Codepoint
+        /// **TBD** as of 2026-05 (V2 watchlist), so there is no table entry
+        /// yet; add one when experimenting against a specific revision.
+        TlsFlags,
+        /// `draft-ietf-tls-trust-anchor-ids`. Codepoint **TBD** as of
+        /// 2026-05 (V2 watchlist); no table entry until assigned.
+        TrustAnchorIds,
+    }
+
+    impl UnstableExtension {
+        /// Stable lowercase telemetry label (O2 / A-cluster convention).
+        pub fn kind(&self) -> &'static str {
+            match self {
+                Self::EchDraft => "ech_draft",
+                Self::TlsFlags => "tls_flags",
+                Self::TrustAnchorIds => "trust_anchor_ids",
+            }
+        }
+    }
+
+    /// The experimental codepoint → class table. **Pre-IANA; may change.**
+    ///
+    /// Seeded only with the historical ECH draft block `0xfe08..=0xfe0c`
+    /// (everything below the stable `0xfe0d`). `TlsFlags` / `TrustAnchorIds`
+    /// have no entry because their codepoints are still TBD (V2) — add them
+    /// here when you have a provisional value to experiment with.
+    pub const UNSTABLE_EXTENSION_TABLE: &[(u16, UnstableExtension)] = &[
+        (0xfe08, UnstableExtension::EchDraft),
+        (0xfe09, UnstableExtension::EchDraft),
+        (0xfe0a, UnstableExtension::EchDraft),
+        (0xfe0b, UnstableExtension::EchDraft),
+        (0xfe0c, UnstableExtension::EchDraft),
+    ];
+
+    /// Classify a single extension type against [`UNSTABLE_EXTENSION_TABLE`].
+    /// Returns `None` for stable / unknown codepoints — including the stable
+    /// ECH `0xfe0d`, which is *not* an unstable codepoint (it's handled by
+    /// the stable parser).
+    pub fn classify_unstable(ext_type: u16) -> Option<UnstableExtension> {
+        UNSTABLE_EXTENSION_TABLE
+            .iter()
+            .find(|(code, _)| *code == ext_type)
+            .map(|(_, class)| *class)
+    }
 }
 
 /// Classified TLS protocol version (SNI backlog A3).
@@ -4281,7 +4393,18 @@ mod tests {
 
         let captured = t16_trace_capture::CapturedEvents::new();
         let subscriber = tracing_subscriber::Registry::default().with(captured.clone());
-        tracing::subscriber::with_default(subscriber, f);
+        // `tracing` caches per-callsite interest process-globally. If another
+        // test hit `extract_sni`'s `trace!` callsite first under the default
+        // no-op dispatcher, its interest is cached as `never` and our
+        // thread-local capturing subscriber is bypassed — a classic flaky
+        // capture-test failure under parallel execution. Installing the
+        // subscriber and then forcing an interest-cache rebuild re-evaluates
+        // every callsite against the now-current capturing dispatcher, making
+        // the capture deterministic regardless of test order.
+        let guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
+        f();
+        drop(guard);
         captured.drain()
     }
 
@@ -4795,6 +4918,87 @@ mod tests {
                 "{label}: pre-filter false-negative",
             );
         }
+    }
+
+    // ── V3: unstable_extensions feature ──────────────────────────────────────
+
+    #[cfg(feature = "unstable_extensions")]
+    #[test]
+    fn v3_classify_unstable_recognises_ech_draft_block() {
+        use super::unstable::{classify_unstable, UnstableExtension};
+        for code in [0xfe08u16, 0xfe09, 0xfe0a, 0xfe0b, 0xfe0c] {
+            assert_eq!(classify_unstable(code), Some(UnstableExtension::EchDraft));
+        }
+    }
+
+    #[cfg(feature = "unstable_extensions")]
+    #[test]
+    fn v3_classify_unstable_excludes_stable_ech_and_unknowns() {
+        use super::unstable::classify_unstable;
+        // 0xfe0d is the STABLE ECH codepoint — not an unstable one.
+        assert_eq!(classify_unstable(EXT_ENCRYPTED_CLIENT_HELLO), None);
+        assert_eq!(classify_unstable(0xfe0d), None);
+        // Ordinary stable / unknown codepoints.
+        assert_eq!(classify_unstable(EXT_SERVER_NAME), None);
+        assert_eq!(classify_unstable(0x0000), None);
+        assert_eq!(classify_unstable(0x1234), None);
+    }
+
+    #[cfg(feature = "unstable_extensions")]
+    #[test]
+    fn v3_unstable_extension_kind_strings_are_stable() {
+        use super::unstable::UnstableExtension;
+        assert_eq!(UnstableExtension::EchDraft.kind(), "ech_draft");
+        assert_eq!(UnstableExtension::TlsFlags.kind(), "tls_flags");
+        assert_eq!(UnstableExtension::TrustAnchorIds.kind(), "trust_anchor_ids");
+    }
+
+    #[cfg(feature = "unstable_extensions")]
+    #[test]
+    fn v3_metadata_unstable_extensions_reads_extension_order_in_wire_order() {
+        use super::unstable::UnstableExtension;
+        // A CH carrying a legacy ECH-draft codepoint (0xfe0a) among normal
+        // extensions. The parser tolerates the unknown type (records it in
+        // extension_order); unstable_extensions() classifies it.
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&build_extension(0xfe0a, &[]));
+        exts.extend_from_slice(&build_alpn_extension(&[b"h2"]));
+        let bytes = build_client_hello(&exts);
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        // The draft codepoint is still in extension_order (stable parse
+        // unchanged), and unstable_extensions surfaces it as EchDraft.
+        assert!(meta.extension_order.contains(&0xfe0a));
+        assert_eq!(
+            meta.unstable_extensions(),
+            vec![(0xfe0a, UnstableExtension::EchDraft)],
+        );
+    }
+
+    #[cfg(feature = "unstable_extensions")]
+    #[test]
+    fn v3_metadata_unstable_extensions_empty_when_none_present() {
+        let bytes = build_client_hello(&build_sni_extension("example.com"));
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(meta.unstable_extensions().is_empty());
+    }
+
+    #[test]
+    fn v3_stable_parse_unaffected_by_unstable_codepoint() {
+        // Runs with the feature OFF too: a CH carrying a draft codepoint must
+        // parse identically — the unknown extension lands in extension_order
+        // and the SNI is still extracted. This pins that the feature is purely
+        // additive (the stable parse never depends on it).
+        let mut exts = build_sni_extension("example.com");
+        exts.extend_from_slice(&build_extension(0xfe0a, &[]));
+        let bytes = build_client_hello(&exts);
+        assert_eq!(
+            extract_sni(&bytes),
+            SniOutcome::Cleartext {
+                host: "example.com".into()
+            },
+        );
+        let meta = parse_client_hello_full(&bytes).expect("well-formed CH");
+        assert!(meta.extension_order.contains(&0xfe0a));
     }
 
     #[test]
