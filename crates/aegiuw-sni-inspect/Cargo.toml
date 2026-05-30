@@ -1,0 +1,23 @@
+# SNI backlog U1: small debug CLI that reads a hex-encoded ClientHello (or
+# a file containing hex) and prints the parsed structure — extract_sni
+# outcome, full ClientHelloMetadata, JA3, and JA4. Useful when triaging a
+# real capture: pre-extract the TLS bytes with `tshark -T fields -e
+# tls.handshake -x <file>` then feed them here.
+
+[package]
+name = "aegiuw-sni-inspect"
+description = "Debug CLI: parse a hex-encoded TLS ClientHello and print the aegiuw-core view of it (SniOutcome, ClientHelloMetadata, JA3, JA4)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "aegiuw-sni-inspect"
+path = "src/main.rs"
+
+[dependencies]
+aegiuw-core = { path = "../aegiuw-core" }

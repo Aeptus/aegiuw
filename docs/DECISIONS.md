@@ -252,6 +252,30 @@ Bundled localhost-only web UI for non-technical configuration. Reload-on-change.
 
 ## Implemented backlog items (from `note.md` / SNI improvements)
 
+- **U1 (P2) `aegiuw-sni-inspect` debug CLI.** Done. New workspace member `crates/aegiuw-sni-inspect` with a single binary. Accepts hex on the command line, from a file (`--file`), or from stdin (`--stdin`); decodes (whitespace, `0x` prefixes, mixed case tolerated); runs `extract_sni`, `parse_client_hello_full`, `ja3`, `ja4`, `known_client_from_ja4`, `likely_launch_source` against the bytes; prints a column-aligned report.
+
+  **Sample output** for the 72-byte D5 worked-example CH:
+  ```
+  extract_sni: Cleartext { host: "example.com" }
+  parse_client_hello_full:
+    host                            Some("example.com")
+    highest_supported_tls_version   Tls12
+    cipher_suites (count)           1
+    …
+  JA3:
+    raw: 771,4865,0,,
+    md5: 1e7c622032b0cb79401b0f7be3793a1a
+  JA4:
+    raw: t12d010100_67e912e3e2b5_000000000000
+  likely_launch_source: Cli
+  ```
+
+  **pcap support is intentionally out of scope** — adds a heavy dep (`pcap`, `pcap-parser`) for a debug tool that runs interactively. Docs include a `tshark`-based pre-extraction recipe: `tshark -r capture.pcap -Y 'tls.handshake.type == 1' -T fields -e tls.record | head -1 | tr -d '\n' | aegiuw-sni-inspect --stdin`.
+
+  **Dependencies:** just `aegiuw-core` via path. No `clap` / `pcap` / `hex` — hand-rolled arg parsing (`std::env::args` matched against `&[String]`) and hand-rolled hex decoder. Keeps the binary small and avoids dragging deps into the workspace for a debug utility.
+
+  Workspace root `Cargo.toml` updated with the new member. `cargo build -q --workspace` green; clippy clean; 288 tests still pass.
+
 - **D6 (P3) GREASE pattern documented at module level + on the `_ => {}` arm.** Done.
 
   Two additions:
